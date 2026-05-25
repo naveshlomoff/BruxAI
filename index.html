@@ -396,6 +396,9 @@ document.addEventListener('touchstart', function iosUnlock() {
           </div>
         </div>
         <div id="stat-debug" style="margin-top:8px;font-family:var(--mono);font-size:11px;color:var(--text);text-align:center;letter-spacing:0.02em;padding:8px;background:var(--bg2);border-radius:var(--r);border:0.5px solid var(--border2);line-height:1.5">— start recording to see live detection signals —</div>
+        <div id="grace-skip-wrap" style="display:none;text-align:center;margin-top:6px">
+          <button onclick="skipGrace()" style="font-size:11px;padding:4px 14px;background:var(--bg3);border:0.5px solid var(--border2);border-radius:var(--r);color:var(--text3);cursor:pointer">⚡ Skip calibration (test mode)</button>
+        </div>
       </div>
 
       <div class="tip-box" style="margin-top:4px">
@@ -668,6 +671,13 @@ async function toggleRecording() {
   if (!state.recording) await startRecording(); else await stopRecording();
 }
 
+function skipGrace() {
+  state.skipGrace = true;
+  const w = document.getElementById('grace-skip-wrap');
+  if (w) w.style.display = 'none';
+  toast('Calibration skipped — detection is active now');
+}
+
 async function startRecording() {
   try {
     state.mediaStream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
@@ -814,6 +824,9 @@ async function saveDraftNight() {
 
 async function stopRecording() {
   state.recording = false;
+  state.skipGrace = false;
+  const _skipWrapStop = document.getElementById('grace-skip-wrap');
+  if (_skipWrapStop) _skipWrapStop.style.display = 'none';
   if(state.animFrame) cancelAnimationFrame(state.animFrame);
   if(state.timerInterval) clearInterval(state.timerInterval);
   if(state.draftTimer) { clearInterval(state.draftTimer); state.draftTimer = null; }
@@ -934,7 +947,7 @@ function analyzeLoop() {
   // time detection opens.
   const GRACE_MS = 5 * 60 * 1000;
   const _recAge = Date.now() - (state.startTime || Date.now());
-  if(cand && _recAge < GRACE_MS){ cand=false; rejReason='grace'; }
+  if(cand && _recAge < GRACE_MS && !state.skipGrace){ cand=false; rejReason='grace'; }
   // ONSET=8 (~130ms sustained signal to open event):
   //   Prevents brief transient sounds (movement in bed, tapping, external noise) from
   //   registering as events. At 60fps each frame ≈16ms; 8 frames = ~130ms minimum onset.
@@ -1000,9 +1013,12 @@ function analyzeLoop() {
     const _gapColor = _gap > 0 ? 'var(--green)' : 'var(--red)';
     // Grace period countdown so user can see calibration phase in real time
     const _graceLeft = Math.max(0, Math.ceil((GRACE_MS - _recAge) / 1000));
-    const _graceSuffix = _graceLeft > 0
+    const _graceSuffix = (_graceLeft > 0 && !state.skipGrace)
       ? ` · <span style="color:var(--text3)">🛡 calibrating ${_graceLeft}s</span>`
       : '';
+    // Show/hide skip button during grace period
+    const _skipWrap = document.getElementById('grace-skip-wrap');
+    if (_skipWrap) _skipWrap.style.display = (_graceLeft > 0 && !state.skipGrace) ? 'block' : 'none';
     _d.innerHTML = `ctx:<b>${ctxState}</b> · dB:<b>${dB}</b> · bx:<b>${peakBrux}</b> avg:<b>${Math.round(bruxBand)}</b> · floor:<b style="color:var(--text2)">${Math.round(nf)}</b> dyn:<b style="color:var(--accent)">${Math.round(dynThresh)}</b> <span style="color:${_gapColor}">gap:${_gap>0?'+':''}${_gap}</span>${_graceSuffix}<br>ba:<b>${Math.round(bass)}</b> lo:<b>${Math.round(lowMid)}</b> <span style="color:var(--text3)">ba/lo:${_baLoRatio}</span> · snr:${Math.round(snoreBand)} · hi:${Math.round(presence)} · <b>${ind}</b>`;
   }
   // Visual level bars
