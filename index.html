@@ -911,11 +911,13 @@ function analyzeLoop() {
     state.noiseFloor = state.noiseFloor * (1 - alpha) + peakBrux * alpha;
   }
   const nf = state.noiseFloor || 0;
-  // Dynamic threshold = max(absolute thresh, 1.6× noise floor + 4).
-  // floor=17 → dynThresh=max(17,31.2)=31.2; grinding at 32-40 clears the bar.
-  // Was 1.8× → dynThresh=34.6; borderline grinding at 32-34 was still missed.
-  // Was 2.2× → dynThresh=41.4; even strong grinding at 38-40 missed.
-  const dynThresh = Math.max(thresh, nf * 1.6 + 4);
+  // Dynamic threshold = max(absolute thresh, 1.3× noise floor + 4).
+  // floor=62 (high-noise mic) → dynThresh=max(25,84.6)=85; grinding at 90+ clears the bar.
+  // Was 1.6× → dynThresh=103.2; grinding couldn't clear the bar on phones with high mic self-noise.
+  // Was 1.8× → dynThresh=115.6; missed all grinding.
+  // Was 2.2× → dynThresh=140.4; missed all grinding.
+  // 1.3× keeps ~30% headroom above floor while still being reachable by bone-conducted grinding.
+  const dynThresh = Math.max(thresh, nf * 1.3 + 4);
   // Trigger on peak energy in bruxism band ONLY (peakBrux). Removed bruxBand OR condition —
   // bruxBand (average) gets elevated by ambient noise even when there's no event, causing
   // false positives during ambient-noise periods.
