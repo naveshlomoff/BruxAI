@@ -538,7 +538,7 @@ document.addEventListener('touchstart', function iosUnlock() {
           <div class="label" style="margin-bottom:0">Detection sensitivity</div>
           <div style="font-family:var(--mono);font-size:12px;color:var(--accent);font-weight:500" id="sens-val">65</div>
         </div>
-        <input type="range" min="20" max="95" value="45" id="sensitivity" step="1" oninput="document.getElementById('sens-val').textContent=this.value">
+        <input type="range" min="20" max="95" value="70" id="sensitivity" step="1" oninput="document.getElementById('sens-val').textContent=this.value">
         <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px;color:var(--text3);margin-top:5px"><span>fewer events</span><span>catch everything</span></div>
       </div>
 
@@ -613,7 +613,7 @@ const state = {
   animFrame: null, timerInterval: null, draftTimer: null, cloudSyncTimer: null,
   inEvent: false, eventStart: 0, silenceFrames: 0, eventFrames: 0,
   waveformData: new Float32Array(256), freqData: new Uint8Array(2048),
-  settings: { filterSnore:true, filterImpact:true, filterSpeech:true, saveClips:true, sensitivity:45, placement:'pillow', reportTime:'07:00' },
+  settings: { filterSnore:true, filterImpact:true, filterSpeech:true, saveClips:true, sensitivity:70, placement:'pillow', reportTime:'07:00' },
   user: null, syncStatus: 'idle', lastSyncError: null
 };
 let _wakeLock = null;
@@ -962,7 +962,7 @@ function analyzeLoop() {
   // Real bruxism onset requires sleep (~10-30 min); missing the first 5 min is fine.
   // The noise floor continues calibrating during grace so dynThresh is accurate by the
   // time detection opens.
-  const GRACE_MS = 5 * 60 * 1000;
+  const GRACE_MS = 2 * 60 * 1000; // 2 min: enough to settle mic, short enough to not frustrate
   const _recAge = Date.now() - (state.startTime || Date.now());
   if(cand && _recAge < GRACE_MS && !state.skipGrace){ cand=false; rejReason='grace'; }
   // ONSET=8 (~130ms sustained signal to open event):
