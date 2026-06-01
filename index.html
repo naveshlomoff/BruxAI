@@ -900,12 +900,15 @@ function analyzeLoop() {
   }
   const peakBruxHz = Math.round(peakBruxBin*bin); // peak Hz WITHIN the bruxism band
   const sens=state.settings.sensitivity;
-  // Threshold formula v5: raised baseline so thresh at sens=70 is ~25, above 16x-amplified
-  // ambient noise (~15-20). Old formula (range 2-18) was always below ambient, so silence
-  // was never detected after grinding stopped — events never closed.
-  // New range [10, 32]: quiet enough to catch grinding, high enough to clear ambient.
-  const thresh=Math.round(10+((sens-20)/75)*22);
-  // ── NOISE FLOOR (v5.12) ──────────────────────────────────────────────────────────────────
+  // Threshold formula v6: range [9, 27]; at sens=70: thresh=21 (was 25 in v5).
+  // Lower absolute thresh lets dynThresh carry the headroom above ambient.
+  const thresh=Math.round(9+((sens-20)/75)*18);
+  // ── GRACE PERIOD (pre-computed before floor update so floor can be gated on it) ───────────
+  // MUST be computed before the noise floor block.
+  const GRACE_MS = 2 * 60 * 1000; // 2 min: mic settle time, short enough for daytime tests
+  const _recAge = Date.now() - (state.startTime || Date.now());
+  const _inGrace = _recAge < GRACE_MS && !state.skipGrace;
+  // ── NOISE FLOOR (v5.14) ──────────────────────────────────────────────────────────────────
   // History of why this is bruxBand and not something else:
   //
   // v5.0–v5.10 used peakBrux (MAX of 151 FFT bins):
@@ -922,19 +925,27 @@ function analyzeLoop() {
   //   This is what the debug "avg" field already shows. Ambient≈21, grinding≈33. Clear margin.
   //   (bruxBandFull is still stored in registerEvent as the Aₚ input for BSI — Phase 2 unchanged.)
   //
+  // v5.14 CRITICAL FIX — floor must NOT update during the grace period:
+  //   Root cause of "detection stops working after a session": if the user grinds (or
+  //   plays audio) during grace, floor tracks that signal (33+) because inEvent never fires
+  //   during grace. After grace: dynThresh = 33×1.3+4 = 47 → grinding (33) can't trigger.
+  //   Fix: freeze floor during _inGrace. Floor starts from 0 when detection opens, so first
+  //   grind sees dynThresh = thresh = 21 (well below 33). Floor then calibrates to actual
+  //   ambient (18-22) within ~30 seconds of real quiet.
+  //
   // alpha_up=0.002 (very slow): floor stays low even during prolonged undetected grinding,
   //   ensuring ONSET (8 frames = 130ms) fires before floor catches up.
   // alpha_down=0.03 (fast): floor drops quickly when room gets quieter.
-  if (!state.inEvent) {
+  if (!state.inEvent && !_inGrace) {
     if (state.noiseFloor === null || state.noiseFloor === undefined) state.noiseFloor = 0;
     const alpha = bruxBand < state.noiseFloor ? 0.03 : 0.002;
     state.noiseFloor = state.noiseFloor * (1 - alpha) + bruxBand * alpha;
   }
   const nf = state.noiseFloor || 0;
-  // dynThresh = max(absolute thresh, 1.3× ambient bruxBand + 4)
-  // Quiet room (nf≈17): dynThresh=max(25,26)=26; grinding avg=33 → detected ✓
-  // Moderate noise (nf=25): dynThresh=max(25,36)=36; grinding avg=40+ → detected ✓
-  const dynThresh = Math.max(thresh, nf * 1.3 + 4);
+  // dynThresh v6: multiplier 1.3→1.2, offset 4→2.
+  // At nf=20 (typical bedroom): was max(25,30)=30, now max(21,26)=26.
+  // Grinding at 28+ now detectable (was 31+). ONSET=8 + MIN_DUR=2.0 prevent false positives.
+  const dynThresh = Math.max(thresh, nf * 1.2 + 2);
   // Detect on bruxBand (= (lowMid+midBand)/2). This is the "avg" shown in the debug bar.
   let cand = (bruxBand > dynThresh);
   let rejReason = '';
@@ -951,20 +962,14 @@ function analyzeLoop() {
   // Decision: accept voiced speech ("ניסיון") as occasional false positive for Phase 1.
   // The user labels it "not_bruxism" in the morning report. Missing grinding = far worse
   // than a few extra events to label. Will revisit with spectral/temporal features in Phase 4.
-  if(state.settings.filterSpeech && presence > midBand*1.4 && presence > 50){ cand=false; rejReason='speech'; }
-  // FILTER (grace period): suppress all events for the first 5 minutes of recording.
-  //
-  // Why: at recording start the noise floor = 0, so dynThresh collapses to thresh (~17).
-  // Any setup sound — placing phone on nightstand, talking, rolling over — crosses 17
-  // and registers as a candidate. This is setup noise, not sleep bruxism.
-  //
-  // 5 minutes covers: phone placement, talking before sleep, initial settling.
-  // Real bruxism onset requires sleep (~10-30 min); missing the first 5 min is fine.
-  // The noise floor continues calibrating during grace so dynThresh is accurate by the
-  // time detection opens.
-  const GRACE_MS = 2 * 60 * 1000; // 2 min: enough to settle mic, short enough to not frustrate
-  const _recAge = Date.now() - (state.startTime || Date.now());
-  if(cand && _recAge < GRACE_MS && !state.skipGrace){ cand=false; rejReason='grace'; }
+  // Speech filter v6: relaxed ratio 1.4→1.6, threshold 50→55.
+  // Played audio from a speaker or hard grinding+breathing elevated presence enough to
+  // trigger the old threshold (presence/midBand > 1.4), falsely labelling real grinding as speech.
+  if(state.settings.filterSpeech && presence > midBand*1.6 && presence > 55){ cand=false; rejReason='speech'; }
+  // FILTER (grace period): suppress events for first 2 min while mic settles.
+  // GRACE_MS, _recAge, and _inGrace are pre-computed above (before the floor update)
+  // because the floor guard also depends on _inGrace.
+  if(cand && _inGrace){ cand=false; rejReason='grace'; }
   // ONSET=8 (~130ms sustained signal to open event):
   //   Prevents brief transient sounds (movement in bed, tapping, external noise) from
   //   registering as events. At 60fps each frame ≈16ms; 8 frames = ~130ms minimum onset.
