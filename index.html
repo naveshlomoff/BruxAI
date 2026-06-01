@@ -673,7 +673,7 @@ async function toggleRecording() {
 
 function skipGrace() {
   state.skipGrace = true;
-  state.noiseFloor = 0; // reset floor so threshold starts from absolute minimum (thresh only)
+  state.noiseFloor = 18; // reset to conservative default so dynThresh starts at ~23.6
   const w = document.getElementById('grace-skip-wrap');
   if (w) w.style.display = 'none';
   toast('Calibration skipped — detection is active now');
@@ -744,7 +744,7 @@ async function startRecording() {
   state.sessionId=state.startTime;  // session ID = start timestamp (unique per recording)
   state.events=[];
   state.inEvent=false; state.silenceFrames=0; state.eventFrames=0;
-  state.noiseFloor=null; // auto-calibrates to room ambient in first ~5s
+  state.noiseFloor=18; // conservative default: dynThresh starts at ~23.6, safely above ambient
   // Persist active flag so we can detect interrupted recordings on next page load
   localStorage.setItem('bt-active-recording', JSON.stringify({
     sessionId: state.sessionId, startTime: state.startTime, lastSeen: Date.now()
@@ -905,7 +905,7 @@ function analyzeLoop() {
   const thresh=Math.round(9+((sens-20)/75)*18);
   // ── GRACE PERIOD (pre-computed before floor update so floor can be gated on it) ───────────
   // MUST be computed before the noise floor block.
-  const GRACE_MS = 2 * 60 * 1000; // 2 min: mic settle time, short enough for daytime tests
+  const GRACE_MS = 30 * 1000; // 30 sec: enough for phone placement, short enough for daytime tests
   const _recAge = Date.now() - (state.startTime || Date.now());
   const _inGrace = _recAge < GRACE_MS && !state.skipGrace;
   // ── NOISE FLOOR (v5.14) ──────────────────────────────────────────────────────────────────
@@ -937,14 +937,18 @@ function analyzeLoop() {
   //   ensuring ONSET (8 frames = 130ms) fires before floor catches up.
   // alpha_down=0.03 (fast): floor drops quickly when room gets quieter.
   if (!state.inEvent && !_inGrace) {
-    if (state.noiseFloor === null || state.noiseFloor === undefined) state.noiseFloor = 0;
+    if (state.noiseFloor === null || state.noiseFloor === undefined) state.noiseFloor = 18;
     const alpha = bruxBand < state.noiseFloor ? 0.03 : 0.002;
     state.noiseFloor = state.noiseFloor * (1 - alpha) + bruxBand * alpha;
+    // Hard cap: floor can never exceed thresh. Grinding (> thresh by design) cannot
+    // contaminate the ambient baseline, even after grace expires in a noisy room.
+    // Max dynThresh = max(thresh, thresh*1.2+2) = thresh*1.2+2 ≈ 27.2 at sens=70.
+    if (state.noiseFloor > thresh) state.noiseFloor = thresh;
   }
   const nf = state.noiseFloor || 0;
-  // dynThresh v6: multiplier 1.3→1.2, offset 4→2.
-  // At nf=20 (typical bedroom): was max(25,30)=30, now max(21,26)=26.
-  // Grinding at 28+ now detectable (was 31+). ONSET=8 + MIN_DUR=2.0 prevent false positives.
+  // dynThresh v6: multiplier 1.3→1.2, offset 4→2. Floor capped at thresh (21 at sens=70).
+  // Max possible dynThresh = thresh*1.2+2 = 27.2. Grinding at 28+ always detectable.
+  // At nf=18 (fresh start): dynThresh=max(21,23.6)=23.6. Grinding(33)>23.6 → detected ✓
   const dynThresh = Math.max(thresh, nf * 1.2 + 2);
   // Detect on bruxBand (= (lowMid+midBand)/2). This is the "avg" shown in the debug bar.
   let cand = (bruxBand > dynThresh);
