@@ -1096,9 +1096,15 @@ function registerEvent(dur,hz,amp,dB) {
 }
 
 async function saveEventClip(ev) {
-  if (!state.mediaRecorder || !state.rollingChunks || state.rollingChunks.length === 0) return;
+  // Guard: mediaRecorder must exist (nulled by stopRecording after 1500ms — safe window).
+  // Note: do NOT early-return if rollingChunks is empty here — the check was moved AFTER
+  // the 1200ms wait below (line ~1132) so that clips fired in the first second of recording
+  // (before the first 1-second chunk arrives) still get saved correctly.
+  if (!state.mediaRecorder || !state.rollingChunks) return;
   try {
-    // Wait a beat for the current chunk to arrive (event just ended)
+    // Wait a beat for the current chunk to arrive (event just ended).
+    // First MediaRecorder chunk arrives at t=1000ms; this 1200ms wait covers events
+    // that fire within the first second (e.g. immediately after pressing Skip).
     await new Promise(r => setTimeout(r, 1200));
     // ── CLIP TRIMMING ─────────────────────────────────────────────────────────────
     // BUG (fixed): taking ALL rollingChunks (full 20-second window) meant the FIRST
