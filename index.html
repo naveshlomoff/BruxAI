@@ -727,7 +727,25 @@ async function startRecording() {
         const now = Date.now();
         // Save the very first chunk as the init segment (iOS MP4: ftyp+moov header lives here).
         // Every trimmed clip must begin with this chunk or iOS reports "operation not supported".
-        if (!state.clipInitChunk) state.clipInitChunk = e.data;
+        if (!state.clipInitChunk) {
+          state.clipInitChunk = e.data;
+          // webm only: extract EBML headers WITHOUT the first Cluster's audio.
+          // Cluster tag = 0x1F 0x43 0xB6 0x75. Everything before it = pure headers.
+          // Stored in state.webmHeadersBlob so trimmed clips can prepend it without
+          // including the t=0..1s silent audio → eliminates the "silence then jump" gap.
+          if ((state.clipMime||'').includes('webm')) {
+            const _fr = new FileReader();
+            _fr.onload = function(evt) {
+              const _b = new Uint8Array(evt.target.result);
+              for (let _i = 0; _i < _b.length-4; _i++) {
+                if (_b[_i]===0x1F&&_b[_i+1]===0x43&&_b[_i+2]===0xB6&&_b[_i+3]===0x75) {
+                  state.webmHeadersBlob = e.data.slice(0, _i); return;
+                }
+              }
+            };
+            _fr.readAsArrayBuffer(e.data);
+          }
+        }
         state.rollingChunks.push(e.data);
         state.chunkTimestamps.push(now);
         // Keep last 45 seconds (was 20s). Extended so that for typical test sessions
@@ -747,6 +765,7 @@ async function startRecording() {
   state.events=[];
   state.inEvent=false; state.silenceFrames=0; state.eventFrames=0;
   state.noiseFloor=18; // conservative default: dynThresh starts at ~23.6, safely above ambient
+  state.webmHeadersBlob=null; // set async on first chunk: webm EBML headers WITHOUT first Cluster's audio
   // Persist active flag so we can detect interrupted recordings on next page load
   localStorage.setItem('bt-active-recording', JSON.stringify({
     sessionId: state.sessionId, startTime: state.startTime, lastSeen: Date.now()
@@ -1108,43 +1127,36 @@ async function saveEventClip(ev) {
     // First MediaRecorder chunk arrives at t=1000ms; this 1200ms wait covers events
     // that fire within the first second (e.g. immediately after pressing Skip).
     await new Promise(r => setTimeout(r, 1200));
-    // ── CLIP TRIMMING ─────────────────────────────────────────────────────────────
-    // BUG (fixed): taking ALL rollingChunks (full 20-second window) meant the FIRST
-    // event of a session included audio from T=0 (start of recording) — e.g. the user
-    // saying "test test" before grinding. This made the clip sound like an old session.
-    //
-    // Fix: trim to start from 2 seconds before this event began.
-    //   ev.id         = Date.now() when event was registered (= end of event)
-    //   ev.duration   = seconds the event lasted
-    //   → event started at approx (ev.id - duration*1000)
-    //   → clip starts  at approx (ev.id - (duration + 2) * 1000)
-    //
-    // For overnight recordings this gives a clip of duration+2 seconds — plenty of
-    // context. For testing it avoids capturing whatever the user said 15s earlier.
     // ── CLIP ASSEMBLY ────────────────────────────────────────────────────────────
-    // Always take the FULL rolling window — no startIdx trimming.
+    // Trim the clip to start 2s before the event begins. This gives the user
+    // immediate audio context without having to seek through 30+ seconds.
     //
-    // Why trimming was removed:
-    //   Old approach prepended clipInitChunk (t=0..1s) to chunks from t=29s onwards.
-    //   For webm (Android): the first cluster has timecode=0ms; the next has timecode=29000ms.
-    //   The browser played the 1s silent init cluster then either stopped or showed a
-    //   28-second "gap" → user heard "1 second of nothing".
-    //   For iOS MP4: ftyp+moov has no audio (pure metadata) so no perceived silence,
-    //   but the mdat timestamps still started at t=29s into a "0-based" file → confusing.
+    // Timing gap problem (solved per-format):
+    //   Naively prepending clipInitChunk (which contains t=0..1s audio) to chunks
+    //   from t=29s causes: silence@t=0, then 28s gap, then grinding → browsers play
+    //   only the first second and stop, or the user hears just 1s of nothing.
     //
-    // New approach: include the full 45-second rolling window.
-    //   For short test sessions (~32s): rollingChunks still contains chunk[0] (init).
-    //     All chunks are sequential → gapless blob ✓
-    //   For overnight sessions: init chunk pruned; prepend it for codec headers.
-    //     iOS: ftyp+moov has 0 audio → no silence ✓
-    //     Android: 1s silence from midnight then 45s of grinding context.
+    //   iOS MP4  : clipInitChunk = ftyp+moov (ZERO audio bytes). No gap possible. ✓
+    //   webm     : state.webmHeadersBlob = EBML headers extracted BEFORE first Cluster.
+    //              No audio data → no timing jump. ✓
+    //   Fallback : startIdx=0 → take all sequential rolling chunks (longer clip, but gapless).
+    const _clipStart = (ev.id||Date.now()) - ((ev.duration||0)+2)*1000;
+    const _rawIdx    = state.chunkTimestamps.findIndex(t => t >= _clipStart);
+    const startIdx   = _rawIdx < 0 ? 0 : _rawIdx;
+    const _isWebm    = (state.clipMime||'').includes('webm');
+
     let chunks;
-    if (state.clipInitChunk && state.rollingChunks.length > 0
-        && state.rollingChunks[0] !== state.clipInitChunk) {
-      // Long session: init chunk pruned — prepend for codec headers
-      chunks = [state.clipInitChunk, ...state.rollingChunks];
+    if (startIdx === 0) {
+      // Near start of recording — all chunks are already sequential, no gap
+      chunks = [...state.rollingChunks];
+    } else if (!_isWebm && state.clipInitChunk) {
+      // iOS MP4: ftyp+moov has 0 audio → prepend is gapless ✓
+      chunks = [state.clipInitChunk, ...state.rollingChunks.slice(startIdx)];
+    } else if (_isWebm && state.webmHeadersBlob) {
+      // Android webm: headers-only (no Cluster@0 audio) + trimmed clusters → gapless ✓
+      chunks = [state.webmHeadersBlob, ...state.rollingChunks.slice(startIdx)];
     } else {
-      // Short session: init still in rolling window, all sequential
+      // Fallback: all rolling chunks — long clip but always correct audio
       chunks = [...state.rollingChunks];
     }
     if (chunks.length === 0) return;
@@ -1267,7 +1279,11 @@ async function preloadClipUrls(events) {
           const d = buf.getChannelData(ch);
           for (let i = 0; i < d.length; i++) d[i] = Math.max(-1, Math.min(1, d[i] * PLAYBACK_GAIN));
         }
-        _clipBufferCache[ev.id] = buf;
+        // startOffset: skip leading context, land 1s before event start.
+        // For properly-trimmed clips (ev.duration+2s): offset ≈ 1s (start just before event).
+        // For long fallback clips (30-45s): offset skips the silence → user hears event immediately.
+        const _off = Math.max(0, buf.duration - (ev.duration || 2) - 1.5);
+        _clipBufferCache[ev.id] = { buf, startOffset: _off };
       } catch(e) { /* decode failed — URL fallback will be used */ }
     } catch(e) { /* skip */ }
   }
@@ -1316,14 +1332,16 @@ function _stopPlayback() {
 
 // Primary path: play a pre-decoded, amplified AudioBuffer via BufferSourceNode.
 // BufferSourceNode.start() is synchronous → satisfies iOS user-gesture requirement.
-// The buffer was decoded+amplified async in preloadClipUrls, before any user tap.
-function _launchBuffer(buf, btn) {
+// bufObj = { buf: AudioBuffer, startOffset: number } OR a bare AudioBuffer (fallback).
+function _launchBuffer(bufObj, btn) {
+  const buf         = (bufObj && bufObj.buf) ? bufObj.buf : bufObj;
+  const startOffset = (bufObj && bufObj.startOffset != null) ? bufObj.startOffset : 0;
   _playbackCtx = new (window.AudioContext || window.webkitAudioContext)();
   if (_playbackCtx.state === 'suspended') _playbackCtx.resume();
   _currentBufSrc = _playbackCtx.createBufferSource();
   _currentBufSrc.buffer = buf;
   _currentBufSrc.connect(_playbackCtx.destination);
-  _currentBufSrc.start(0);
+  _currentBufSrc.start(0, startOffset); // startOffset skips leading silence to land near event
   btn.classList.add('clip-playing'); btn.dataset.playing = '1';
   btn.innerHTML = _STOP_SVG + 'Stop';
   _currentBufSrc.onended = () => _stopPlayback();
@@ -1373,8 +1391,10 @@ function playClip(eventId, btn) {
           const d = newBuf.getChannelData(ch);
           for (let i = 0; i < d.length; i++) d[i] = Math.max(-1, Math.min(1, d[i] * PLAYBACK_GAIN));
         }
-        _clipBufferCache[parseInt(eventId)] = newBuf;
-        _launchBuffer(newBuf, btn);
+        const _off2 = Math.max(0, newBuf.duration - 3.5);
+        const newBufObj = { buf: newBuf, startOffset: _off2 };
+        _clipBufferCache[parseInt(eventId)] = newBufObj;
+        _launchBuffer(newBufObj, btn);
       } catch(e) { _launchUrl(newUrl, btn); }
     } catch(e) { toast('Error loading clip: ' + e.message); _resetPlayButton(btn); }
   })();
