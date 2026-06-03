@@ -617,12 +617,12 @@ const state = {
   user: null, syncStatus: 'idle', lastSyncError: null
 };
 let _wakeLock = null;
-let _clipUrlCache = {}; // eventId → blob URL (for iOS gesture-preserving playback)
+let _clipUrlCache    = {}; // eventId → blob URL (fallback playback)
+let _clipBufferCache = {}; // eventId → amplified AudioBuffer (primary playback, pre-decoded)
 function _revokeClipCache() {
-  // Release all blob URLs before clearing the cache — prevents memory leaks
-  // (each URL holds the underlying ArrayBuffer alive until revoked or page unload)
   Object.values(_clipUrlCache).forEach(url => { try { URL.revokeObjectURL(url); } catch(e) {} });
   _clipUrlCache = {};
+  _clipBufferCache = {}; // AudioBuffers are GC'd automatically; just drop the references
 }
 
 // "Night date" = startTime shifted back 12h so a session starting at 23:00 OR 02:00 both belong to the same calendar night
@@ -730,8 +730,10 @@ async function startRecording() {
         if (!state.clipInitChunk) state.clipInitChunk = e.data;
         state.rollingChunks.push(e.data);
         state.chunkTimestamps.push(now);
-        // Keep only last 20 seconds worth of chunks
-        while(state.chunkTimestamps.length>0 && now-state.chunkTimestamps[0]>20000){
+        // Keep last 45 seconds (was 20s). Extended so that for typical test sessions
+        // (grace 30s + event 2s = ~32s), the init chunk stays in rollingChunks and
+        // clip assembly produces a gapless sequential blob with no timing discontinuity.
+        while(state.chunkTimestamps.length>0 && now-state.chunkTimestamps[0]>45000){
           state.rollingChunks.shift();
           state.chunkTimestamps.shift();
         }
@@ -1119,21 +1121,31 @@ async function saveEventClip(ev) {
     //
     // For overnight recordings this gives a clip of duration+2 seconds — plenty of
     // context. For testing it avoids capturing whatever the user said 15s earlier.
-    const clipStartTime = (ev.id || Date.now()) - ((ev.duration || 0) + 2) * 1000;
-    const startIdx = state.chunkTimestamps.findIndex(t => t >= clipStartTime);
-    // Build the chunk array.
-    // If startIdx <= 0 → take everything (init chunk is already chunk[0]).
-    // If startIdx > 0 → trimmed slice starts mid-stream.
-    //   iOS MP4 (fMP4): chunk[0] = ftyp+moov init header; later chunks = moof+mdat.
-    //   Slicing from mid-stream without prepending init header makes the blob undecodable.
-    //   Fix: always prepend state.clipInitChunk when skipping past chunk[0].
+    // ── CLIP ASSEMBLY ────────────────────────────────────────────────────────────
+    // Always take the FULL rolling window — no startIdx trimming.
+    //
+    // Why trimming was removed:
+    //   Old approach prepended clipInitChunk (t=0..1s) to chunks from t=29s onwards.
+    //   For webm (Android): the first cluster has timecode=0ms; the next has timecode=29000ms.
+    //   The browser played the 1s silent init cluster then either stopped or showed a
+    //   28-second "gap" → user heard "1 second of nothing".
+    //   For iOS MP4: ftyp+moov has no audio (pure metadata) so no perceived silence,
+    //   but the mdat timestamps still started at t=29s into a "0-based" file → confusing.
+    //
+    // New approach: include the full 45-second rolling window.
+    //   For short test sessions (~32s): rollingChunks still contains chunk[0] (init).
+    //     All chunks are sequential → gapless blob ✓
+    //   For overnight sessions: init chunk pruned; prepend it for codec headers.
+    //     iOS: ftyp+moov has 0 audio → no silence ✓
+    //     Android: 1s silence from midnight then 45s of grinding context.
     let chunks;
-    if (startIdx <= 0) {
-      chunks = [...state.rollingChunks];
-    } else if (state.clipInitChunk) {
-      chunks = [state.clipInitChunk, ...state.rollingChunks.slice(startIdx)];
+    if (state.clipInitChunk && state.rollingChunks.length > 0
+        && state.rollingChunks[0] !== state.clipInitChunk) {
+      // Long session: init chunk pruned — prepend for codec headers
+      chunks = [state.clipInitChunk, ...state.rollingChunks];
     } else {
-      chunks = [...state.rollingChunks]; // fallback: take all if init not captured yet
+      // Short session: init still in rolling window, all sequential
+      chunks = [...state.rollingChunks];
     }
     if (chunks.length === 0) return;
     const mime = state.clipMime || 'audio/webm';
@@ -1231,14 +1243,32 @@ async function renderEventsScreen() {
 
 function lbadge(l){if(l==='yes')return`<span class="tag" style="background:var(--greenlt);color:var(--green)">confirmed</span>`;if(l==='no')return`<span class="tag" style="background:var(--redlt);color:var(--red)">rejected</span>`;if(l==='maybe')return`<span class="tag" style="background:var(--amberlt);color:var(--amber)">unsure</span>`;return`<span class="tag" style="background:var(--bg3);color:var(--text3)">unconfirmed</span>`;}
 
-// Pre-build blob URLs for all clips in the current view, so playClip can use them synchronously.
-// This is the iOS user-gesture fix: audio.play() must be called without any prior await.
+// Pre-load all clips: create blob URLs AND decode+amplify into AudioBuffers.
+// All async work happens HERE (before any user gesture) so playClip can
+// call BufferSourceNode.start() synchronously within the tap — satisfying iOS policy.
+const PLAYBACK_GAIN = 8; // ~+18 dB: compensates for raw mic level in MediaRecorder stream
 async function preloadClipUrls(events) {
   for (const ev of events) {
-    if (!ev.hasClip || _clipUrlCache[ev.id]) continue;
+    if (!ev.hasClip || _clipBufferCache[ev.id]) continue;
     try {
       const blob = await loadClipBlob(ev.id, ev.clipPath);
-      if (blob) _clipUrlCache[ev.id] = URL.createObjectURL(blob);
+      if (!blob) continue;
+      if (!_clipUrlCache[ev.id]) _clipUrlCache[ev.id] = URL.createObjectURL(blob);
+      // Decode audio and amplify samples — runs async here, result cached for synchronous playback
+      try {
+        const ab = await new Promise((res, rej) => {
+          const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej;
+          r.readAsArrayBuffer(blob);
+        });
+        const tmpCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const buf = await new Promise((res, rej) => tmpCtx.decodeAudioData(ab, res, rej));
+        try { tmpCtx.close(); } catch(_) {}
+        for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+          const d = buf.getChannelData(ch);
+          for (let i = 0; i < d.length; i++) d[i] = Math.max(-1, Math.min(1, d[i] * PLAYBACK_GAIN));
+        }
+        _clipBufferCache[ev.id] = buf;
+      } catch(e) { /* decode failed — URL fallback will be used */ }
     } catch(e) { /* skip */ }
   }
 }
@@ -1264,72 +1294,88 @@ async function loadClipBlob(eventId, clipPath) {
   return null;
 }
 
-let _currentAudio = null;
-let _playbackCtx  = null; // Web Audio context for gain boost during playback
+let _currentAudio  = null; // HTML Audio element (URL fallback, no boost)
+let _currentBufSrc = null; // Web Audio BufferSourceNode (primary, boosted)
+let _playbackCtx   = null; // AudioContext for BufferSourceNode
+
+const _PLAY_SVG = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px"><path d="M5 3l14 9-14 9V3z"/></svg>';
+const _STOP_SVG = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
 
 function _resetPlayButton(btn) {
   btn.classList.remove('clip-playing');
   btn.dataset.playing = '0';
-  btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px"><path d="M5 3l14 9-14 9V3z"/></svg>Play';
+  btn.innerHTML = _PLAY_SVG + 'Play';
 }
 
-// Stop whatever is playing and tear down the Web Audio boost graph.
 function _stopPlayback() {
-  if (_currentAudio) { try { _currentAudio.pause(); } catch(e) {} _currentAudio = null; }
-  if (_playbackCtx)  { try { _playbackCtx.close();  } catch(e) {} _playbackCtx  = null; }
+  if (_currentBufSrc) { try { _currentBufSrc.stop(); } catch(e) {} _currentBufSrc = null; }
+  if (_currentAudio)  { try { _currentAudio.pause(); } catch(e) {} _currentAudio  = null; }
+  if (_playbackCtx)   { try { _playbackCtx.close();  } catch(e) {} _playbackCtx   = null; }
   document.querySelectorAll('.clip-playing').forEach(_resetPlayButton);
 }
 
-// Connect an Audio element through a Web Audio GainNode and start playing.
-// PLAYBACK_GAIN = 8 (~+18 dB). Recordings are made from the raw mic stream
-// (MediaRecorder bypasses the 16x analyser gain), so clips sound very quiet
-// without a boost. 8x brings pillow-muffled grinding to a clearly audible level.
-// Uses createMediaElementSource so audio.play() is still called synchronously
-// (required by iOS user-gesture policy).
-const PLAYBACK_GAIN = 8;
-function _launchClip(audio, btn) {
-  try {
-    _playbackCtx = new (window.AudioContext || window.webkitAudioContext)();
-    if (_playbackCtx.state === 'suspended') _playbackCtx.resume();
-    const src  = _playbackCtx.createMediaElementSource(audio);
-    const gain = _playbackCtx.createGain();
-    gain.gain.value = PLAYBACK_GAIN;
-    src.connect(gain);
-    gain.connect(_playbackCtx.destination);
-  } catch(e) {
-    // Web Audio unavailable (very old browser) — play without boost
-    if (_playbackCtx) { try { _playbackCtx.close(); } catch(_) {} _playbackCtx = null; }
-  }
+// Primary path: play a pre-decoded, amplified AudioBuffer via BufferSourceNode.
+// BufferSourceNode.start() is synchronous → satisfies iOS user-gesture requirement.
+// The buffer was decoded+amplified async in preloadClipUrls, before any user tap.
+function _launchBuffer(buf, btn) {
+  _playbackCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (_playbackCtx.state === 'suspended') _playbackCtx.resume();
+  _currentBufSrc = _playbackCtx.createBufferSource();
+  _currentBufSrc.buffer = buf;
+  _currentBufSrc.connect(_playbackCtx.destination);
+  _currentBufSrc.start(0);
+  btn.classList.add('clip-playing'); btn.dataset.playing = '1';
+  btn.innerHTML = _STOP_SVG + 'Stop';
+  _currentBufSrc.onended = () => _stopPlayback();
+}
+
+// Fallback path: plain HTML Audio element (no boost — used when decode failed).
+function _launchUrl(url, btn) {
+  const audio = new Audio(url);
   _currentAudio = audio;
-  btn.classList.add('clip-playing');
-  btn.dataset.playing = '1';
-  btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>Stop';
+  btn.classList.add('clip-playing'); btn.dataset.playing = '1';
+  btn.innerHTML = _STOP_SVG + 'Stop';
   audio.play().catch(e => { toast('Could not play audio: ' + e.message); _stopPlayback(); });
   audio.onended = () => _stopPlayback();
 }
 
 function playClip(eventId, btn) {
-  // Read playing state BEFORE any DOM mutation (toggle logic depends on it)
-  const wasThisPlaying = btn.dataset.playing === '1';
-  _stopPlayback(); // always stop whatever is running
-  if (wasThisPlaying) return; // same clip clicked again → just stop, do not restart
+  const wasPlaying = btn.dataset.playing === '1'; // read BEFORE _stopPlayback resets buttons
+  _stopPlayback();
+  if (wasPlaying) return; // same button tapped → toggle off
 
-  // Synchronous path: use pre-cached URL (preserves iOS user gesture)
-  const cachedUrl = _clipUrlCache[parseInt(eventId)] || _clipUrlCache[eventId];
-  if (cachedUrl) {
-    _launchClip(new Audio(cachedUrl), btn);
-    return;
-  }
-  // Async fallback: clip not pre-cached (e.g. not yet downloaded from cloud)
+  const id = parseInt(eventId) || eventId;
+  const buf = _clipBufferCache[id] || _clipBufferCache[eventId];
+  const url = _clipUrlCache[id]    || _clipUrlCache[eventId];
+
+  if (buf) { try { _launchBuffer(buf, btn); return; } catch(e) { /* fall through to URL */ } }
+  if (url) { _launchUrl(url, btn); return; }
+
+  // Async fallback: not yet loaded (e.g. direct navigation to report without preload)
   (async () => {
     try {
       btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="vertical-align:middle;margin-right:3px"><circle cx="12" cy="12" r="10"/></svg>Loading…';
       const ev = (_currentNight?.events || state.events).find(e => String(e.id) === String(eventId));
       const blob = await loadClipBlob(eventId, ev?.clipPath);
       if (!blob) { toast('Audio clip not available'); _resetPlayButton(btn); return; }
-      const url = URL.createObjectURL(blob);
-      _clipUrlCache[parseInt(eventId)] = url;
-      _launchClip(new Audio(url), btn);
+      const newUrl = URL.createObjectURL(blob);
+      _clipUrlCache[parseInt(eventId)] = newUrl;
+      // Attempt decode+amplify on the fly
+      try {
+        const ab = await new Promise((res, rej) => {
+          const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej;
+          r.readAsArrayBuffer(blob);
+        });
+        const tmpCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const newBuf = await new Promise((res, rej) => tmpCtx.decodeAudioData(ab, res, rej));
+        try { tmpCtx.close(); } catch(_) {}
+        for (let ch = 0; ch < newBuf.numberOfChannels; ch++) {
+          const d = newBuf.getChannelData(ch);
+          for (let i = 0; i < d.length; i++) d[i] = Math.max(-1, Math.min(1, d[i] * PLAYBACK_GAIN));
+        }
+        _clipBufferCache[parseInt(eventId)] = newBuf;
+        _launchBuffer(newBuf, btn);
+      } catch(e) { _launchUrl(newUrl, btn); }
     } catch(e) { toast('Error loading clip: ' + e.message); _resetPlayButton(btn); }
   })();
 }
