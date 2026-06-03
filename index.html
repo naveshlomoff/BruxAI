@@ -1265,29 +1265,59 @@ async function loadClipBlob(eventId, clipPath) {
 }
 
 let _currentAudio = null;
+let _playbackCtx  = null; // Web Audio context for gain boost during playback
+
 function _resetPlayButton(btn) {
   btn.classList.remove('clip-playing');
   btn.dataset.playing = '0';
   btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px"><path d="M5 3l14 9-14 9V3z"/></svg>Play';
 }
-function playClip(eventId, btn) {
-  // Stop any currently playing clip first
-  if (_currentAudio) {
-    try { _currentAudio.pause(); } catch(e) {}
-    _currentAudio = null;
-    document.querySelectorAll('.clip-playing').forEach(_resetPlayButton);
-    if (btn.dataset.playing === '1') { btn.dataset.playing = '0'; return; }
+
+// Stop whatever is playing and tear down the Web Audio boost graph.
+function _stopPlayback() {
+  if (_currentAudio) { try { _currentAudio.pause(); } catch(e) {} _currentAudio = null; }
+  if (_playbackCtx)  { try { _playbackCtx.close();  } catch(e) {} _playbackCtx  = null; }
+  document.querySelectorAll('.clip-playing').forEach(_resetPlayButton);
+}
+
+// Connect an Audio element through a Web Audio GainNode and start playing.
+// PLAYBACK_GAIN = 8 (~+18 dB). Recordings are made from the raw mic stream
+// (MediaRecorder bypasses the 16x analyser gain), so clips sound very quiet
+// without a boost. 8x brings pillow-muffled grinding to a clearly audible level.
+// Uses createMediaElementSource so audio.play() is still called synchronously
+// (required by iOS user-gesture policy).
+const PLAYBACK_GAIN = 8;
+function _launchClip(audio, btn) {
+  try {
+    _playbackCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (_playbackCtx.state === 'suspended') _playbackCtx.resume();
+    const src  = _playbackCtx.createMediaElementSource(audio);
+    const gain = _playbackCtx.createGain();
+    gain.gain.value = PLAYBACK_GAIN;
+    src.connect(gain);
+    gain.connect(_playbackCtx.destination);
+  } catch(e) {
+    // Web Audio unavailable (very old browser) — play without boost
+    if (_playbackCtx) { try { _playbackCtx.close(); } catch(_) {} _playbackCtx = null; }
   }
+  _currentAudio = audio;
+  btn.classList.add('clip-playing');
+  btn.dataset.playing = '1';
+  btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>Stop';
+  audio.play().catch(e => { toast('Could not play audio: ' + e.message); _stopPlayback(); });
+  audio.onended = () => _stopPlayback();
+}
+
+function playClip(eventId, btn) {
+  // Read playing state BEFORE any DOM mutation (toggle logic depends on it)
+  const wasThisPlaying = btn.dataset.playing === '1';
+  _stopPlayback(); // always stop whatever is running
+  if (wasThisPlaying) return; // same clip clicked again → just stop, do not restart
+
   // Synchronous path: use pre-cached URL (preserves iOS user gesture)
   const cachedUrl = _clipUrlCache[parseInt(eventId)] || _clipUrlCache[eventId];
   if (cachedUrl) {
-    const audio = new Audio(cachedUrl);
-    _currentAudio = audio;
-    btn.classList.add('clip-playing');
-    btn.dataset.playing = '1';
-    btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>Stop';
-    audio.play().catch(e => { toast('Could not play audio: ' + e.message); _resetPlayButton(btn); });
-    audio.onended = () => { _currentAudio = null; _resetPlayButton(btn); };
+    _launchClip(new Audio(cachedUrl), btn);
     return;
   }
   // Async fallback: clip not pre-cached (e.g. not yet downloaded from cloud)
@@ -1296,16 +1326,10 @@ function playClip(eventId, btn) {
       btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="vertical-align:middle;margin-right:3px"><circle cx="12" cy="12" r="10"/></svg>Loading…';
       const ev = (_currentNight?.events || state.events).find(e => String(e.id) === String(eventId));
       const blob = await loadClipBlob(eventId, ev?.clipPath);
-      if (!blob) { toast('Audio clip not available (not yet uploaded or already deleted)'); _resetPlayButton(btn); return; }
+      if (!blob) { toast('Audio clip not available'); _resetPlayButton(btn); return; }
       const url = URL.createObjectURL(blob);
       _clipUrlCache[parseInt(eventId)] = url;
-      const audio = new Audio(url);
-      _currentAudio = audio;
-      btn.classList.add('clip-playing');
-      btn.dataset.playing = '1';
-      btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>Stop';
-      audio.play().catch(e => { toast('Could not play audio: ' + e.message); _resetPlayButton(btn); });
-      audio.onended = () => { _currentAudio = null; _resetPlayButton(btn); };
+      _launchClip(new Audio(url), btn);
     } catch(e) { toast('Error loading clip: ' + e.message); _resetPlayButton(btn); }
   })();
 }
