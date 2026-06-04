@@ -727,21 +727,26 @@ async function startRecording() {
         // Every trimmed clip must begin with this chunk or iOS reports "operation not supported".
         if (!state.clipInitChunk) {
           state.clipInitChunk = e.data;
-          // webm only: extract EBML headers WITHOUT the first Cluster's audio.
-          // Cluster tag = 0x1F 0x43 0xB6 0x75. Everything before it = pure headers.
-          // Stored in state.webmHeadersBlob so trimmed clips can prepend it without
-          // including the t=0..1s silent audio → eliminates the "silence then jump" gap.
           if ((state.clipMime||'').includes('webm')) {
+            // webm: extract EBML headers-only (no Cluster audio) for gap-free trimming
             const _fr = new FileReader();
             _fr.onload = function(evt) {
               const _b = new Uint8Array(evt.target.result);
               for (let _i = 0; _i < _b.length-4; _i++) {
                 if (_b[_i]===0x1F&&_b[_i+1]===0x43&&_b[_i+2]===0xB6&&_b[_i+3]===0x75) {
-                  state.webmHeadersBlob = e.data.slice(0, _i); return;
+                  state.webmHeadersBlob = e.data.slice(0, _i); break;
                 }
               }
+              state._clipInitReady = true;
             };
             _fr.readAsArrayBuffer(e.data);
+          } else {
+            // MP4 (iOS): patch mvhd/tkhd/mdhd duration fields to 0 so Safari plays full clip.
+            // Without this, Safari stops at the ~1-2 s declared in the moov init segment.
+            _patchMp4Duration(e.data).then(patched => {
+              state.clipInitChunk = patched;
+              state._clipInitReady = true;
+            }).catch(() => { state._clipInitReady = true; /* use unpatched on failure */ });
           }
         }
         state.rollingChunks.push(e.data);
@@ -763,7 +768,8 @@ async function startRecording() {
   state.events=[];
   state.inEvent=false; state.silenceFrames=0; state.eventFrames=0;
   state.noiseFloor=18; // conservative default: dynThresh starts at ~23.6, safely above ambient
-  state.webmHeadersBlob=null; // set async on first chunk: webm EBML headers WITHOUT first Cluster's audio
+  state.webmHeadersBlob=null;  // webm: EBML headers without first Cluster's audio (for clean trimming)
+  state._clipInitReady=false;  // true once clipInitChunk async patch is complete
   // Persist active flag so we can detect interrupted recordings on next page load
   localStorage.setItem('bt-active-recording', JSON.stringify({
     sessionId: state.sessionId, startTime: state.startTime, lastSeen: Date.now()
@@ -886,6 +892,49 @@ async function stopRecording() {
   syncNightToCloud(night); // fire-and-forget — errors caught internally
   toast('Recording saved — check your report!');
   showScreen('events', document.querySelectorAll('.nav-btn')[1]);
+}
+
+// ── MP4 DURATION PATCH ───────────────────────────────────────────────────────
+// iOS MediaRecorder sets mvhd/tkhd/mdhd duration = first timeslice length (~1-2 s)
+// in the ftyp+moov init chunk.  Safari respects this field and STOPS playback at that
+// timestamp, silently discarding the rest of the audio.
+// Fix: zero out all duration fields (0 = undetermined / live-stream mode).
+// Safari then plays every mdat fragment it finds until EOF → full clip plays.
+//
+// Box offsets (ISO 14496-12):
+//   mvhd/mdhd v0: size(4)+type(4)+v+flags(4)+creation(4)+modification(4)+timescale(4)+DURATION(4)
+//     → duration at p+24 (4 bytes)
+//   mvhd/mdhd v1: size(4)+type(4)+v+flags(4)+creation(8)+modification(8)+timescale(4)+DURATION(8)
+//     → duration at p+32 (8 bytes)
+//   tkhd v0: size(4)+type(4)+v+flags(4)+creation(4)+modification(4)+trackid(4)+reserved(4)+DURATION(4)
+//     → duration at p+28 (4 bytes)
+//   tkhd v1: size(4)+type(4)+v+flags(4)+creation(8)+modification(8)+trackid(4)+reserved(4)+DURATION(8)
+//     → duration at p+36 (8 bytes)
+//   mehd v0/v1: size(4)+type(4)+v+flags(4)+DURATION(4 or 8)  → duration at p+12
+async function _patchMp4Duration(blob) {
+  const ab = await new Promise((res, rej) => {
+    const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej;
+    r.readAsArrayBuffer(blob);
+  });
+  const arr  = new Uint8Array(ab);
+  const view = new DataView(ab);
+  function zero(off, len) { for (let i = 0; i < len; i++) arr[off + i] = 0; }
+  function scan(s, e) {
+    let p = s;
+    while (p + 8 <= e) {
+      const sz = view.getUint32(p);
+      if (sz < 8 || p + sz > e) break;
+      const t = String.fromCharCode(arr[p+4], arr[p+5], arr[p+6], arr[p+7]);
+      const v = arr[p + 8]; // FullBox version byte
+      if (t === 'mvhd' || t === 'mdhd') { if (v===0) zero(p+24,4); else zero(p+32,8); }
+      if (t === 'tkhd')                 { if (v===0) zero(p+28,4); else zero(p+36,8); }
+      if (t === 'mehd')                 { if (v===0) zero(p+12,4); else zero(p+12,8); }
+      if (['moov','trak','mdia','minf','mvex','edts','udta','stbl'].includes(t)) scan(p+8, p+sz);
+      p += sz;
+    }
+  }
+  scan(0, arr.length);
+  return new Blob([arr], { type: blob.type });
 }
 
 function analyzeLoop() {
@@ -1125,6 +1174,13 @@ async function saveEventClip(ev) {
     // First MediaRecorder chunk arrives at t=1000ms; this 1200ms wait covers events
     // that fire within the first second (e.g. immediately after pressing Skip).
     await new Promise(r => setTimeout(r, 1200));
+    // Wait for the init chunk async patch to finish (MP4: duration fields zeroed;
+    // webm: EBML headers extracted). Normally done well before first event fires (~1 s
+    // after recording start vs 30+ s for first event), so this is usually instant.
+    const _patchWaitStart = Date.now();
+    while (!state._clipInitReady && Date.now() - _patchWaitStart < 2000) {
+      await new Promise(r => setTimeout(r, 50));
+    }
     // ── CLIP ASSEMBLY ────────────────────────────────────────────────────────────
     // Trim the clip to start 2s before the event begins. This gives the user
     // immediate audio context without having to seek through 30+ seconds.
