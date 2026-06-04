@@ -1291,7 +1291,6 @@ async function loadClipBlob(eventId, clipPath) {
 }
 
 let _currentAudio = null; // currently-playing HTML Audio element
-let _playbackCtx  = null; // AudioContext for GainNode boost (created per-play, closed on stop)
 
 const _PLAY_SVG = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px"><path d="M5 3l14 9-14 9V3z"/></svg>';
 const _STOP_SVG = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
@@ -1304,30 +1303,18 @@ function _resetPlayButton(btn) {
 
 function _stopPlayback() {
   if (_currentAudio) { try { _currentAudio.pause(); } catch(e) {} _currentAudio = null; }
-  if (_playbackCtx)  { try { _playbackCtx.close();  } catch(e) {} _playbackCtx  = null; }
   document.querySelectorAll('.clip-playing').forEach(_resetPlayButton);
 }
 
-// Play a clip URL through Web Audio for volume boost.
-// Uses createMediaElementSource so audio.play() is still called synchronously
-// within the user gesture — iOS requirement. AudioContext is created here (in the
-// gesture), so it starts in 'running' state on iOS 14+; resume() handles older iOS.
-// Falls back to plain audio.play() if Web Audio setup fails (still audible, just quieter).
+// Play a clip URL.  Plain Audio element — no Web Audio chain.
+// Web Audio (createMediaElementSource / BufferSource) was tried twice and failed:
+//   • createMediaElementSource: context suspended → silent (no exception, just no output)
+//   • decodeAudioData: truncates clip at Duration header (≈2 s) → wrong audio
+// The HTML Audio element always plays the full blob as-is, which is correct.
+// Volume = max phone media volume (user should turn up handset volume).
 function _launchUrl(url, btn) {
   const audio = new Audio(url);
   _currentAudio = audio;
-  try {
-    _playbackCtx = new (window.AudioContext || window.webkitAudioContext)();
-    _playbackCtx.resume(); // no-await: fires within gesture; context running before first sample
-    const src  = _playbackCtx.createMediaElementSource(audio);
-    const gain = _playbackCtx.createGain();
-    gain.gain.value = PLAYBACK_GAIN;
-    src.connect(gain);
-    gain.connect(_playbackCtx.destination);
-  } catch(e) {
-    // Web Audio unavailable or failed — audio still plays at native volume via element
-    if (_playbackCtx) { try { _playbackCtx.close(); } catch(_){} _playbackCtx = null; }
-  }
   btn.classList.add('clip-playing'); btn.dataset.playing = '1';
   btn.innerHTML = _STOP_SVG + 'Stop';
   audio.play().catch(e => { toast('Could not play audio: ' + e.message); _stopPlayback(); });
