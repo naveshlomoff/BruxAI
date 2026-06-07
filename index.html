@@ -426,6 +426,7 @@ document.addEventListener('touchstart', function iosUnlock() {
         <div class="app-title">Morning report</div>
         <div class="app-sub" id="report-date">Last night · —</div>
       </div>
+      <button id="back-to-history-btn" onclick="backToHistory()" style="display:none;position:absolute;right:0;top:50%;transform:translateY(-50%);background:none;border:none;padding:8px 4px;cursor:pointer;font-family:var(--mono);font-size:11px;color:var(--accent2)">← History</button>
     </div>
     <div class="scroll"><div class="pad">
 
@@ -1276,15 +1277,37 @@ function startTimer() {
 }
 
 let _currentNight = null;
+let _pendingNightSessionId = null; // set by openNightForLabeling to override most-recent logic
+
+function backToHistory() {
+  _pendingNightSessionId = null;
+  showScreen('history', document.querySelectorAll('.nav-btn')[2]);
+}
+
+async function openNightForLabeling(date) {
+  const nights = await dbGetAll('nights').catch(()=>[]);
+  const forDate = nights.filter(n => n.date === date);
+  if (!forDate.length) { toast('Night data not available locally'); return; }
+  // Pick session with most events (most likely the real overnight recording)
+  forDate.sort((a,b) => (b.eventCount||b.events?.length||0) - (a.eventCount||a.events?.length||0));
+  _pendingNightSessionId = forDate[0].sessionId;
+  showScreen('events', document.querySelectorAll('.nav-btn')[1]);
+}
+
 async function renderEventsScreen() {
-  // Find the night to display: if recording, use live state; else load the most recent session from DB
+  // Find the night to display: if recording, use live state;
+  // if _pendingNightSessionId set (from History tap), load that session;
+  // else load the most recent session from DB.
   let night = null, events = [];
-  // Clear stale cached blob URLs from any previous session view.
-  // Revoke all cached blob URLs before re-rendering — releases memory from previous session view.
   _revokeClipCache();
+  const isHistoricalView = !!_pendingNightSessionId;
   if (state.recording && state.sessionId) {
     night = { sessionId: state.sessionId, date: sessionDate(state.startTime), duration: Math.round((Date.now()-state.startTime)/1000) };
     events = [...state.events];
+  } else if (_pendingNightSessionId) {
+    night = await dbGet('nights', _pendingNightSessionId).catch(()=>null);
+    _pendingNightSessionId = null;
+    events = night ? (night.events||[]) : [];
   } else {
     const nights = await dbGetAll('nights').catch(()=>[]);
     // Prefer non-draft (completed) sessions; fall back to draft (interrupted) if that's all we have
@@ -1294,6 +1317,9 @@ async function renderEventsScreen() {
     events = night ? (night.events||[]) : [];
   }
   _currentNight = night;
+  // Show back button only when viewing a historical night (not live and not most-recent)
+  const backBtn = document.getElementById('back-to-history-btn');
+  if (backBtn) backBtn.style.display = isHistoricalView ? 'block' : 'none';
   const labelDate = night ? new Date(night.startTime || Date.now()) : new Date();
   document.getElementById('report-date').textContent = (state.recording?'Live · ':'Last session · ') + labelDate.toLocaleDateString('en',{weekday:'long',month:'long',day:'numeric'}) + (night?.draft?' (interrupted)':'');
   const list=document.getElementById('events-list');
@@ -1513,7 +1539,7 @@ async function renderHistoryScreen(){
     const ds=n.duration>3600?`${dh}h ${dm}m`:`${dm} min`;
     const gc=n.eventCount<5?'pill-green':n.eventCount<12?'pill-amber':'pill-red';
     const sessTag = n.sessionCount>1 ? ` · ${n.sessionCount} sessions` : '';
-    return`<div class="night-item"><div class="night-item-left"><h3>${lbl}</h3><p>${ds} · ${n.confirmedCount||0} confirmed${sessTag}</p></div><span class="pill ${gc}">${n.eventCount} events</span></div>`;
+    return`<div class="night-item" onclick="openNightForLabeling('${n.date}')" style="cursor:pointer"><div class="night-item-left"><h3>${lbl}</h3><p>${ds} · ${n.confirmedCount||0} confirmed${sessTag}</p></div><div style="display:flex;align-items:center;gap:8px"><span class="pill ${gc}">${n.eventCount} events</span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="2" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg></div></div>`;
   }).join('');
 }
 
