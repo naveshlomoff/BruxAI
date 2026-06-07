@@ -670,6 +670,9 @@ function showScreen(name,btn) {
   document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
   document.getElementById('screen-'+name).classList.add('active');
   if(btn) btn.classList.add('active');
+  // Clear historical-view state when leaving the events screen via nav tabs
+  // (not via ← History button, which calls backToHistory() directly)
+  if(name !== 'events') _viewingSessionId = null;
   if(name==='events') renderEventsScreen();
   if(name==='history') renderHistoryScreen();
   if(name==='settings') renderStorageInfo();
@@ -1277,10 +1280,12 @@ function startTimer() {
 }
 
 let _currentNight = null;
-let _pendingNightSessionId = null; // set by openNightForLabeling to override most-recent logic
+// Persists across renderEventsScreen calls while user is labeling a historical night.
+// Cleared only when user taps "← History" or navigates away from events screen.
+let _viewingSessionId = null;
 
 function backToHistory() {
-  _pendingNightSessionId = null;
+  _viewingSessionId = null;
   showScreen('history', document.querySelectorAll('.nav-btn')[2]);
 }
 
@@ -1290,23 +1295,24 @@ async function openNightForLabeling(date) {
   if (!forDate.length) { toast('Night data not available locally'); return; }
   // Pick session with most events (most likely the real overnight recording)
   forDate.sort((a,b) => (b.eventCount||b.events?.length||0) - (a.eventCount||a.events?.length||0));
-  _pendingNightSessionId = forDate[0].sessionId;
+  _viewingSessionId = forDate[0].sessionId;
   showScreen('events', document.querySelectorAll('.nav-btn')[1]);
 }
 
 async function renderEventsScreen() {
-  // Find the night to display: if recording, use live state;
-  // if _pendingNightSessionId set (from History tap), load that session;
-  // else load the most recent session from DB.
+  // Night selection priority:
+  //   1. Live recording (always show current session)
+  //   2. _viewingSessionId set (user tapped a historical night — stays set until ← History)
+  //   3. Most recent completed/draft session
   let night = null, events = [];
   _revokeClipCache();
-  const isHistoricalView = !!_pendingNightSessionId;
+  const isHistoricalView = !state.recording && !!_viewingSessionId;
   if (state.recording && state.sessionId) {
     night = { sessionId: state.sessionId, date: sessionDate(state.startTime), duration: Math.round((Date.now()-state.startTime)/1000) };
     events = [...state.events];
-  } else if (_pendingNightSessionId) {
-    night = await dbGet('nights', _pendingNightSessionId).catch(()=>null);
-    _pendingNightSessionId = null;
+  } else if (_viewingSessionId) {
+    night = await dbGet('nights', _viewingSessionId).catch(()=>null);
+    // Do NOT clear _viewingSessionId here — must persist across confirmEvent re-renders
     events = night ? (night.events||[]) : [];
   } else {
     const nights = await dbGetAll('nights').catch(()=>[]);
