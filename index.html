@@ -617,10 +617,19 @@ const state = {
   user: null, syncStatus: 'idle', lastSyncError: null
 };
 let _wakeLock = null;
-let _clipUrlCache = {}; // eventId → blob URL (preloaded so playClip is synchronous)
+let _clipUrlCache = {}; // eventId → blob URL (fallback when decodeAudioData fails)
+let _clipAudioCache = {}; // eventId → AudioBuffer (pre-decoded; enables gain-boosted playback)
+let _audioCtx = null; // singleton AudioContext, reused across plays
+function _getAudioCtx() {
+  if (!_audioCtx || _audioCtx.state === 'closed') {
+    _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  return _audioCtx;
+}
 function _revokeClipCache() {
   Object.values(_clipUrlCache).forEach(url => { try { URL.revokeObjectURL(url); } catch(e) {} });
   _clipUrlCache = {};
+  _clipAudioCache = {};
 }
 
 // "Night date" = startTime shifted back 12h so a session starting at 23:00 OR 02:00 both belong to the same calendar night
@@ -1309,19 +1318,32 @@ async function renderEventsScreen() {
 
 function lbadge(l){if(l==='yes')return`<span class="tag" style="background:var(--greenlt);color:var(--green)">confirmed</span>`;if(l==='no')return`<span class="tag" style="background:var(--redlt);color:var(--red)">rejected</span>`;if(l==='maybe')return`<span class="tag" style="background:var(--amberlt);color:var(--amber)">unsure</span>`;return`<span class="tag" style="background:var(--bg3);color:var(--text3)">unconfirmed</span>`;}
 
-// Pre-build blob URLs before rendering so playClip can call audio.play()
-// synchronously within the user gesture (iOS requirement).
-// No decodeAudioData here — that API truncates clips at the Duration header
-// value (~2s set by MediaRecorder for the first timeslice), losing the actual
-// grinding audio. Volume boost is handled in playClip via createMediaElementSource.
-const PLAYBACK_GAIN = 8; // ~+18 dB; compensates raw mic level in MediaRecorder stream
+// Pre-build AudioBuffers (primary) and blob URLs (fallback) before rendering.
+// Primary path: decodeAudioData → AudioBuffer stored in _clipAudioCache.
+//   Playback uses AudioBufferSourceNode + GainNode(8x) — fully synchronous in
+//   the click handler after ctx.resume() unlocks the AudioContext.
+// Fallback path: blob URL stored in _clipUrlCache, played via plain Audio element.
+//   Used when decodeAudioData fails (e.g. old unpatched clips with wrong duration).
+// Note: duration=0 patch in clipInitChunk means decodeAudioData now decodes the
+//   full clip (no longer truncates at the 1-2 s MediaRecorder header value).
+const PLAYBACK_GAIN = 8; // ~+18 dB; compensates raw mic level
 async function preloadClipUrls(events) {
   for (const ev of events) {
-    if (!ev.hasClip || _clipUrlCache[ev.id]) continue;
+    if (!ev.hasClip || _clipAudioCache[ev.id] || _clipUrlCache[ev.id]) continue;
     try {
       const blob = await loadClipBlob(ev.id, ev.clipPath);
-      if (blob) _clipUrlCache[ev.id] = URL.createObjectURL(blob);
-    } catch(e) { /* skip */ }
+      if (!blob) continue;
+      try {
+        const ab = await blob.arrayBuffer();
+        const ctx = _getAudioCtx();
+        const audioBuffer = await ctx.decodeAudioData(ab);
+        _clipAudioCache[ev.id] = audioBuffer;
+      } catch(decodeErr) {
+        // decodeAudioData failed (old clip, unsupported codec) → fall back to blob URL
+        console.warn('decodeAudioData failed for clip', ev.id, decodeErr.message);
+        _clipUrlCache[ev.id] = URL.createObjectURL(blob);
+      }
+    } catch(e) { /* loadClipBlob failed, skip */ }
   }
 }
 
@@ -1346,7 +1368,8 @@ async function loadClipBlob(eventId, clipPath) {
   return null;
 }
 
-let _currentAudio = null; // currently-playing HTML Audio element
+let _currentAudio = null;  // currently-playing HTML Audio element (fallback path)
+let _currentSource = null; // currently-playing AudioBufferSourceNode (primary path)
 
 const _PLAY_SVG = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px"><path d="M5 3l14 9-14 9V3z"/></svg>';
 const _STOP_SVG = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
@@ -1358,16 +1381,31 @@ function _resetPlayButton(btn) {
 }
 
 function _stopPlayback() {
-  if (_currentAudio) { try { _currentAudio.pause(); } catch(e) {} _currentAudio = null; }
+  if (_currentSource) { try { _currentSource.stop(); } catch(e) {} _currentSource = null; }
+  if (_currentAudio)  { try { _currentAudio.pause(); } catch(e) {} _currentAudio  = null; }
   document.querySelectorAll('.clip-playing').forEach(_resetPlayButton);
 }
 
-// Play a clip URL.  Plain Audio element — no Web Audio chain.
-// Web Audio (createMediaElementSource / BufferSource) was tried twice and failed:
-//   • createMediaElementSource: context suspended → silent (no exception, just no output)
-//   • decodeAudioData: truncates clip at Duration header (≈2 s) → wrong audio
-// The HTML Audio element always plays the full blob as-is, which is correct.
-// Volume = max phone media volume (user should turn up handset volume).
+// Gain-boosted playback via AudioBufferSourceNode (primary path).
+// ctx.resume() is called synchronously within the click handler (user gesture),
+// which unlocks the iOS AudioContext before any async work happens.
+function _launchBuffer(buffer, btn) {
+  const ctx = _getAudioCtx();
+  ctx.resume(); // unlock iOS AudioContext — must be synchronous in user gesture
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+  const gain = ctx.createGain();
+  gain.gain.value = PLAYBACK_GAIN;
+  source.connect(gain);
+  gain.connect(ctx.destination);
+  _currentSource = source;
+  btn.classList.add('clip-playing'); btn.dataset.playing = '1';
+  btn.innerHTML = _STOP_SVG + 'Stop';
+  source.onended = () => _stopPlayback();
+  source.start(0);
+}
+
+// Fallback: plain Audio element (no gain boost) for clips that failed decodeAudioData.
 function _launchUrl(url, btn) {
   const audio = new Audio(url);
   _currentAudio = audio;
@@ -1382,20 +1420,38 @@ function playClip(eventId, btn) {
   _stopPlayback();
   if (wasPlaying) return; // same button tapped → toggle off
 
-  const id  = parseInt(eventId) || eventId;
+  const id = parseInt(eventId) || eventId;
+
+  // Primary: gain-boosted AudioBuffer path
+  const buffer = _clipAudioCache[id] || _clipAudioCache[eventId];
+  if (buffer) { _launchBuffer(buffer, btn); return; }
+
+  // Fallback: blob URL → plain Audio element
   const url = _clipUrlCache[id] || _clipUrlCache[eventId];
   if (url) { _launchUrl(url, btn); return; }
+
+  // Unlock AudioContext NOW — must be synchronous within the click handler (user gesture).
+  // _launchBuffer called later (after awaits) will find the context already resuming.
+  _getAudioCtx().resume();
 
   // Async fallback: clip not yet in cache (e.g. direct navigation to report without preload)
   (async () => {
     try {
       btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="vertical-align:middle;margin-right:3px"><circle cx="12" cy="12" r="10"/></svg>Loading…';
-      const ev  = (_currentNight?.events || state.events).find(e => String(e.id) === String(eventId));
+      const ev = (_currentNight?.events || state.events).find(e => String(e.id) === String(eventId));
       const blob = await loadClipBlob(eventId, ev?.clipPath);
       if (!blob) { toast('Audio clip not available'); _resetPlayButton(btn); return; }
-      const newUrl = URL.createObjectURL(blob);
-      _clipUrlCache[parseInt(eventId)] = newUrl;
-      _launchUrl(newUrl, btn);
+      const numId = parseInt(eventId);
+      try {
+        const ab = await blob.arrayBuffer();
+        const audioBuffer = await _getAudioCtx().decodeAudioData(ab);
+        _clipAudioCache[numId] = audioBuffer;
+        _launchBuffer(audioBuffer, btn);
+      } catch(decodeErr) {
+        const newUrl = URL.createObjectURL(blob);
+        _clipUrlCache[numId] = newUrl;
+        _launchUrl(newUrl, btn);
+      }
     } catch(e) { toast('Error loading clip: ' + e.message); _resetPlayButton(btn); }
   })();
 }
