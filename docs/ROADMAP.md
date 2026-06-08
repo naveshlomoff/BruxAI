@@ -43,19 +43,34 @@ Move BruxTrack from a passive frequency-threshold detector to a learning system 
 
 ---
 
-## Phase 2 — BSI Formula (1 week) ⬜
+## Phase 2 — BSI Formula (1 week) 🟡
 
-**Goal:** Patent-protected BSI score computed in Supabase Edge Function after every night.
+**Goal:** Patent-protected BSI score computed after every night.
+
+**Status note (2026-06-08):** Implemented as a **client-side prototype** first (in `index.html`,
+alongside `syncNightToCloud`) rather than starting with a Deno Edge Function — lets us validate
+the formula and population-bootstrap behavior against real labeled data before committing to a
+server-side schema/migration. Porting to an Edge Function remains the follow-up step once the
+prototype is validated against a few nights of real scores.
 
 **Tasks:**
-- [ ] Set up Deno Edge Function runtime
-- [ ] Implement `compute_bsi()` — Fp, Dp, Ap, C, weighted sum
-- [ ] Seed `population_stats` from initial nights
-- [ ] Trigger BSI computation on night sync
-- [ ] Display BSI in morning report (replace raw score)
-- [ ] Severity bands: None / Mild / Moderate / Severe / Very Severe (per P2 Section 4.3)
-- [ ] Compute and store EBI = Σ BSI(n) / N
-- [ ] Compute and store EBI² = Σ BSI(n)² / N
+- [ ] Set up Deno Edge Function runtime *(deferred — prototype runs client-side for now)*
+- [x] Implement `compute_bsi()` — Fp, Dp, Ap, C, weighted sum *(client-side: `computeBSI()`)*
+- [x] Seed `population_stats` from initial nights *(client-side: `computeBsiPopulationStats()` —
+      computed on-demand from the user's own labeled nights in IndexedDB; bootstraps once ≥5
+      labeled nights exist, per the patent's bootstrap-from-own-history approach. Not yet
+      persisted to the Supabase `population_stats` table — that's part of the Edge Function port.)*
+- [ ] Trigger BSI computation on night sync *(currently computed on-demand when the report/history
+      screens render — `computeAndStoreBSI()`; not yet triggered from `syncNightToCloud` itself,
+      and not yet synced to the cloud `nights.bsi_score` / `ebi_cumulative` columns — needs schema
+      verification first per CLAUDE.md §10 "stop and ask before touching the Supabase schema")*
+- [x] Display BSI in morning report *(added alongside the existing raw-activity-score card —
+      did not replace it, so the existing UI/labeling flow stays intact)*
+- [x] Severity bands: None/minimal (0–15) / Mild (16–35) / Moderate (36–60) / Severe (61–79) /
+      Very severe (80–100) — exact cut points per P2 §4.3 (`bsiSeverityBand()`)
+- [x] Compute and store EBI = Σ BSI(n) / N *(client-side, local-only: `computeEBI()` +
+      `renderEbiCard()` on the History screen)*
+- [x] Compute and store EBI² = Σ BSI(n)² / N *(same — `computeEBI()` returns both)*
 
 ---
 

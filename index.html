@@ -440,6 +440,16 @@ document.addEventListener('touchstart', function iosUnlock() {
         <div style="font-family:var(--mono);font-size:9px;color:var(--text3)">Confirm events below to refine accuracy</div>
       </div>
 
+      <div class="card" id="bsi-card" style="display:none;margin-top:10px">
+        <div class="label" style="margin-bottom:4px">BSI — Bruxism Severity Index</div>
+        <div style="display:flex;align-items:flex-end;gap:10px">
+          <div class="report-score"><span id="bsi-score-val">—</span><span style="font-size:20px;color:var(--text3)">/100</span></div>
+          <div class="pill pill-amber" id="bsi-band" style="margin-bottom:8px">—</div>
+        </div>
+        <div class="score-bar-bg"><div class="score-bar-fill" id="bsi-bar" style="width:0%"></div></div>
+        <div style="font-family:var(--mono);font-size:9px;color:var(--text3)" id="bsi-breakdown">—</div>
+      </div>
+
       <div class="stats-grid" id="summary-stats" style="display:none;margin-bottom:12px">
         <div class="stat-card"><div class="stat-val" id="sum-events" style="color:var(--hot)">0</div><div class="stat-lbl">flagged</div></div>
         <div class="stat-card"><div class="stat-val" id="sum-confirmed" style="color:var(--green)">0</div><div class="stat-lbl">confirmed</div></div>
@@ -490,6 +500,16 @@ document.addEventListener('touchstart', function iosUnlock() {
       <div class="card">
         <div class="label" style="margin-bottom:8px">Event trend</div>
         <canvas id="trend-canvas" width="320" height="100" style="width:100%;height:100px"></canvas>
+      </div>
+
+      <div class="card" id="ebi-card" style="display:none">
+        <div class="label" style="margin-bottom:8px">EBI — cumulative bruxism load</div>
+        <div class="stats-grid" style="margin-bottom:4px">
+          <div class="stat-card"><div class="stat-val" id="ebi-val" style="color:var(--accent2)">—</div><div class="stat-lbl">EBI (avg)</div></div>
+          <div class="stat-card"><div class="stat-val" id="ebi2-val" style="color:var(--hot)">—</div><div class="stat-lbl">EBI² (weighted)</div></div>
+          <div class="stat-card"><div class="stat-val" id="ebi-n-val" style="color:var(--text2)">—</div><div class="stat-lbl">scored nights</div></div>
+        </div>
+        <div style="font-family:var(--mono);font-size:9px;color:var(--text3)" id="ebi-note">—</div>
       </div>
 
       <div class="label">All nights</div>
@@ -1329,7 +1349,7 @@ async function renderEventsScreen() {
   const labelDate = night ? new Date(night.startTime || Date.now()) : new Date();
   document.getElementById('report-date').textContent = (state.recording?'Live · ':'Last session · ') + labelDate.toLocaleDateString('en',{weekday:'long',month:'long',day:'numeric'}) + (night?.draft?' (interrupted)':'');
   const list=document.getElementById('events-list');
-  if(!events.length){list.innerHTML=`<div class="empty"><div class="empty-icon">◎</div><div class="empty-text">No events detected yet.<br>Start a recording session first.</div></div>`;document.getElementById('report-card').style.display='none';document.getElementById('summary-stats').style.display='none';return;}
+  if(!events.length){list.innerHTML=`<div class="empty"><div class="empty-icon">◎</div><div class="empty-text">No events detected yet.<br>Start a recording session first.</div></div>`;document.getElementById('report-card').style.display='none';document.getElementById('summary-stats').style.display='none';document.getElementById('bsi-card').style.display='none';return;}
   const confirmed=events.filter(e=>e.label==='yes').length, rejected=events.filter(e=>e.label==='no').length, total=events.length;
   const raw=Math.round(events.reduce((s,e)=>s+(e.bruxismScore||0),0)/total);
   const adj=Math.round(raw*(1-rejected/total*0.5));
@@ -1340,6 +1360,8 @@ async function renderEventsScreen() {
   document.getElementById('sum-events').textContent=total;document.getElementById('sum-confirmed').textContent=confirmed;
   const dur = night?.duration || (state.startTime?Math.floor((Date.now()-state.startTime)/60000):0);
   document.getElementById('sum-duration').textContent=dur>3600?Math.floor(dur/3600)+'h '+Math.floor((dur%3600)/60)+'m':Math.floor(dur/60)+' min';
+  // Phase 2 — BSI for this night (client-side prototype, see computeAndStoreBSI)
+  await renderBsiCard(night);
   // Preload clip URLs BEFORE rendering — ensures Play buttons work on first tap (iOS gesture fix).
   // iOS blocks audio.play() if called after an await (async fallback path).
   // Awaiting here ensures the synchronous cache-hit path in playClip is always taken.
@@ -1536,6 +1558,7 @@ async function renderHistoryScreen(){
   for(let d=1;d<=daysInMonth;d++){const ds=`${year}-${String(month+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;const n=nights.find(x=>x.date===ds);let cls='empty',lbl='—';if(n){const c=n.eventCount||0;lbl=c;cls=c===0?'low':c<5?'low':c<12?'med':c<20?'high':'severe';}html+=`<div class="cal-day ${cls}">${lbl}</div>`;}
   cal.innerHTML=html;
   renderTrendChart(nights);
+  renderEbiCard(); // Phase 2 — EBI/EBI² longitudinal summary (fire-and-forget, scores any unscored nights)
   const nl=document.getElementById('nights-list');
   if(!nights.length){nl.innerHTML=`<div class="empty"><div class="empty-icon">◎</div><div class="empty-text">No nights recorded yet.</div></div>`;return;}
   nl.innerHTML=nights.slice().reverse().map(n=>{
@@ -1735,6 +1758,219 @@ function updateSyncStatus(status, errMsg) {
     document.getElementById('sync-error-text').textContent = errMsg || 'Unknown error';
     banner.classList.add('show');
   }
+}
+
+// ── PHASE 2 — BSI / EBI (Bruxism Severity Index / Energy Bruxism Index) ─────
+// Client-side prototype per Patent Family P2 (acoustic-only embodiment, see
+// CLAUDE.md §6). The formula, the weights (0.45 / 0.30 / 0.25), the 250–3500 Hz
+// band, and the severity-band cut points are PATENT CLAIMS — exact values,
+// do not modify without coordinating with the patent attorney (CLAUDE.md §8).
+//
+//   BSI = min(100, W1·Fp + W2·Dp + W3·Ap) × C
+//     Fp = percentile rank of (confirmed events / hour) vs. population
+//     Dp = percentile rank of (mean confirmed-event duration) vs. population
+//     Ap = percentile rank of (mean confirmed-event amplitude, 250–3500Hz) vs. population
+//     C  = confirmed_events / total_candidate_events
+//   EBI(N)  = Σ BSI(n) / N    (linear  — average bruxism load / AUC ÷ N)
+//   EBI²(N) = Σ BSI(n)² / N   (quadratic — weights severe nights heavily)
+//
+// Bootstrap (patent-covered, CLAUDE.md §6): population stats are derived from
+// the user's OWN previously labeled nights — "relative to the user's previous
+// nights" until the population registry (Phase 5) exists. Computed fresh from
+// local IndexedDB on demand (no separate population_stats persistence yet —
+// that lands when this moves server-side / Edge Function in a later phase).
+// Per user decision: Fp/Dp/Ap are derived from CONFIRMED (label==='yes')
+// events only; C uses all candidate events as the formula defines.
+
+const BSI_MIN_POPULATION_NIGHTS = 5; // patent: bootstrap from user's first 5–10 nights
+
+// Linear-interpolation percentile of a *sorted* numeric array (numpy 'linear' method).
+function _percentileOf(sorted, p) {
+  if (!sorted.length) return 0;
+  if (sorted.length === 1) return sorted[0];
+  const idx = (p / 100) * (sorted.length - 1);
+  const lo = Math.floor(idx), hi = Math.ceil(idx);
+  if (lo === hi) return sorted[lo];
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
+}
+function _distributionOf(values) {
+  const s = [...values].sort((a, b) => a - b);
+  return { p10: _percentileOf(s,10), p25: _percentileOf(s,25), p50: _percentileOf(s,50),
+           p75: _percentileOf(s,75), p90: _percentileOf(s,90), n: s.length };
+}
+
+// Percentile RANK (0–100) of `value` against a {p10..p90} distribution descriptor.
+// Piecewise-linear interpolation between the known percentile points (anchored at
+// (0,0)); extrapolates beyond p90 using the p75→p90 slope, capped at 100.
+// Returns 50 (neutral midpoint) when there isn't enough population data yet.
+function percentileRank(value, dist) {
+  if (!dist || dist.n < 2) return 50;
+  const pts = [[0,0],[10,dist.p10],[25,dist.p25],[50,dist.p50],[75,dist.p75],[90,dist.p90]];
+  for (let i=1;i<pts.length;i++) if (pts[i][1] < pts[i-1][1]) pts[i][1] = pts[i-1][1]; // enforce monotonic
+  if (value <= pts[0][1]) return 0;
+  for (let i=1;i<pts.length;i++) {
+    const [r0,v0]=pts[i-1], [r1,v1]=pts[i];
+    if (value <= v1) return v1===v0 ? r1 : r0 + (value-v0)/(v1-v0)*(r1-r0);
+  }
+  const [r75,v75]=pts[4], [r90,v90]=pts[5];
+  const slope = (v90-v75) > 0 ? (r90-r75)/(v90-v75) : 0;
+  return Math.min(100, r90 + (value-v90)*slope);
+}
+
+// Per-night raw aggregates feeding BSI. F/D/A over CONFIRMED events only; C over all.
+function nightBsiAggregates(night) {
+  const events = night?.events || [];
+  const confirmed = events.filter(e => e.label === 'yes');
+  const hours = (night?.duration || 0) / 3600;
+  return {
+    F: hours > 0 ? confirmed.length / hours : 0,                                                    // events/hour
+    D: confirmed.length ? confirmed.reduce((s,e)=>s+(e.duration||0),0) / confirmed.length : 0,      // mean duration (s)
+    A: confirmed.length ? confirmed.reduce((s,e)=>s+(e.amplitude||0),0) / confirmed.length : 0,     // mean 250–3500Hz energy
+    C: events.length ? confirmed.length / events.length : 0,                                        // confirmation ratio
+    confirmedCount: confirmed.length,
+    totalCount: events.length,
+  };
+}
+
+// Build F/D/A population distributions from the user's OTHER labeled nights
+// (excludeSessionId = the night being scored, so it's measured against everything else).
+async function computeBsiPopulationStats(excludeSessionId) {
+  const nights = await dbGetAll('nights').catch(() => []);
+  const labeled = nights.filter(n =>
+    n.sessionId !== excludeSessionId &&
+    Array.isArray(n.events) &&
+    n.events.some(e => e.label === 'yes')
+  );
+  if (labeled.length < 2) return null;
+  const Fs=[], Ds=[], As=[];
+  for (const n of labeled) {
+    const agg = nightBsiAggregates(n);
+    if (agg.confirmedCount > 0) { Fs.push(agg.F); Ds.push(agg.D); As.push(agg.A); }
+  }
+  if (Fs.length < 2) return null;
+  return { eventsPerHour: _distributionOf(Fs), meanDuration: _distributionOf(Ds),
+           meanAmplitude: _distributionOf(As), nNights: Fs.length };
+}
+
+// Severity bands — EXACT per patent P2 §4.3 (Figure 2). Cut points are patent claims.
+function bsiSeverityBand(bsi) {
+  if (bsi <= 15) return 'None/minimal';
+  if (bsi <= 35) return 'Mild';
+  if (bsi <= 60) return 'Moderate';
+  if (bsi <= 79) return 'Severe';
+  return 'Very severe';
+}
+function bsiBandPillClass(band) {
+  if (band === 'None/minimal' || band === 'Mild') return 'pill-green';
+  if (band === 'Moderate') return 'pill-amber';
+  return 'pill-red'; // Severe / Very severe
+}
+
+// BSI = min(100, W1·Fp + W2·Dp + W3·Ap) × C — weights are patent claims, exact values.
+function computeBSI(night, popStats) {
+  const agg = nightBsiAggregates(night);
+  const W1 = 0.45, W2 = 0.30, W3 = 0.25;
+  const fp = percentileRank(agg.F, popStats?.eventsPerHour);
+  const dp = percentileRank(agg.D, popStats?.meanDuration);
+  const ap = percentileRank(agg.A, popStats?.meanAmplitude);
+  const bsi = Math.min(100, W1*fp + W2*dp + W3*ap) * agg.C;
+  return { bsi: Math.round(bsi*10)/10, fp: Math.round(fp), dp: Math.round(dp), ap: Math.round(ap),
+           c: Math.round(agg.C*100)/100, band: bsiSeverityBand(bsi) };
+}
+
+// EBI(N)=ΣBSI/N · EBI²(N)=ΣBSI²/N · AUC=ΣBSI — exact per patent P2 §5.
+function computeEBI(bsiScores) {
+  const N = bsiScores.length;
+  if (!N) return { ebi:0, ebi2:0, auc:0, n:0 };
+  const sum = bsiScores.reduce((a,b)=>a+b,0);
+  const sumSq = bsiScores.reduce((a,b)=>a+b*b,0);
+  return { ebi: Math.round(sum/N*10)/10, ebi2: Math.round(sumSq/N*10)/10,
+           auc: Math.round(sum*10)/10, n: N };
+}
+
+// Compute BSI for `night`, persist it onto the local night record (new keys on
+// the existing object — no IndexedDB schema change/migration needed), and return
+// a status descriptor the UI renders directly.
+//   status: 'no_confirmed_events' | 'building_population' | 'ok'
+async function computeAndStoreBSI(night) {
+  if (!night?.sessionId || !Array.isArray(night.events)) return null;
+  try {
+    const confirmed = night.events.filter(e => e.label === 'yes');
+    if (!confirmed.length) {
+      night.bsiScore = null; night.bsiBand = null; night.bsiBreakdown = null;
+      await dbPut('nights', night);
+      return { status: 'no_confirmed_events' };
+    }
+    const popStats = await computeBsiPopulationStats(night.sessionId);
+    if (!popStats || popStats.nNights < BSI_MIN_POPULATION_NIGHTS) {
+      night.bsiScore = null; night.bsiBand = null; night.bsiBreakdown = null;
+      await dbPut('nights', night);
+      return { status: 'building_population', popNights: popStats?.nNights || 0, minNeeded: BSI_MIN_POPULATION_NIGHTS };
+    }
+    const r = computeBSI(night, popStats);
+    night.bsiScore = r.bsi;
+    night.bsiBand = r.band;
+    night.bsiBreakdown = { fp: r.fp, dp: r.dp, ap: r.ap, c: r.c, popNights: popStats.nNights };
+    await dbPut('nights', night);
+    return { status: 'ok', ...r, popNights: popStats.nNights };
+  } catch(e) { console.warn('computeAndStoreBSI failed', e); return null; }
+}
+
+// Render the BSI card on the morning report for the night currently being viewed.
+async function renderBsiCard(night) {
+  const card = document.getElementById('bsi-card');
+  if (!card) return;
+  if (!night || state.recording || !Array.isArray(night.events)) { card.style.display = 'none'; return; }
+  const r = await computeAndStoreBSI(night);
+  const valEl = document.getElementById('bsi-score-val');
+  const barEl = document.getElementById('bsi-bar');
+  const bandEl = document.getElementById('bsi-band');
+  const noteEl = document.getElementById('bsi-breakdown');
+  if (r?.status === 'ok') {
+    card.style.display = 'block';
+    valEl.textContent = r.bsi;
+    barEl.style.width = Math.min(100, r.bsi) + '%';
+    bandEl.textContent = r.band;
+    bandEl.className = 'pill ' + bsiBandPillClass(r.band);
+    noteEl.textContent = `Fp ${r.fp} · Dp ${r.dp} · Ap ${r.ap} · C ${r.c} · vs ${r.popNights} prior nights`;
+  } else if (r?.status === 'building_population') {
+    card.style.display = 'block';
+    valEl.textContent = '—';
+    barEl.style.width = '0%';
+    bandEl.textContent = 'Building baseline';
+    bandEl.className = 'pill pill-amber';
+    noteEl.textContent = `Collecting your personal baseline — ${r.popNights}/${r.minNeeded} labeled nights so far`;
+  } else {
+    card.style.display = 'none';
+  }
+}
+
+// Render the EBI summary card on the History screen — scores any not-yet-scored
+// labeled nights first (keeps EBI in sync as the user labels more nights/events).
+async function renderEbiCard() {
+  const card = document.getElementById('ebi-card');
+  if (!card) return;
+  try {
+    const nights = await dbGetAll('nights').catch(() => []);
+    const labeled = nights.filter(n => Array.isArray(n.events) && n.events.some(e => e.label === 'yes'));
+    // Recompute BSI for EVERY labeled night against the CURRENT population each time —
+    // not just newly-labeled ones. Otherwise early nights stay frozen against a tiny
+    // bootstrap population while later nights score against a larger one, making the
+    // values mutually incomparable (and skewing EBI/EBI², which assume comparable BSI
+    // units). The patent explicitly allows this: population stats are "improved as the
+    // registry grows" (CLAUDE.md §6) — re-normalising historical scores is the correct
+    // behaviour during the bootstrap phase. computeAndStoreBSI() mutates `n` in place.
+    for (const n of labeled) await computeAndStoreBSI(n);
+    const scored = labeled.filter(n => typeof n.bsiScore === 'number')
+                          .sort((a,b) => (a.startTime||0) - (b.startTime||0));
+    if (!scored.length) { card.style.display = 'none'; return; }
+    const r = computeEBI(scored.map(n => n.bsiScore));
+    card.style.display = 'block';
+    document.getElementById('ebi-val').textContent = r.ebi;
+    document.getElementById('ebi2-val').textContent = r.ebi2;
+    document.getElementById('ebi-n-val').textContent = r.n;
+    document.getElementById('ebi-note').textContent = `AUC ${r.auc} BSI·nights · longitudinal band: ${bsiSeverityBand(r.ebi)}`;
+  } catch(e) { console.warn('renderEbiCard failed', e); card.style.display = 'none'; }
 }
 
 // ── CLOUD SYNC ─────────────────────────────────────────────────────────────
