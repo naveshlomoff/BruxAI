@@ -1940,6 +1940,15 @@ async function renderBsiCard(night) {
     bandEl.textContent = 'Building baseline';
     bandEl.className = 'pill pill-amber';
     noteEl.textContent = `Collecting your personal baseline — ${r.popNights}/${r.minNeeded} labeled nights so far`;
+  } else if (r?.status === 'no_confirmed_events') {
+    // Always show *something* here rather than hiding silently — otherwise it
+    // looks like the feature doesn't exist when really it's just waiting on labels.
+    card.style.display = 'block';
+    valEl.textContent = '—';
+    barEl.style.width = '0%';
+    bandEl.textContent = 'Awaiting labels';
+    bandEl.className = 'pill pill-amber';
+    noteEl.textContent = `BSI needs at least one event confirmed as "Bruxism" below — it can't be scored yet`;
   } else {
     card.style.display = 'none';
   }
