@@ -1979,6 +1979,7 @@ async function computeAndStoreBSI(night) {
     night.bsiBand = r.band;
     night.bsiBreakdown = { fp: r.fp, dp: r.dp, ap: r.ap, c: r.c, popNights: popStats.nNights };
     await dbPut('nights', night);
+    syncNightToCloud(night); // push bsi_score to cloud (fire-and-forget)
     return { status: 'ok', ...r, popNights: popStats.nNights };
   } catch(e) { console.warn('computeAndStoreBSI failed', e); return null; }
 }
@@ -2068,6 +2069,7 @@ async function syncNightToCloud(night) {
       confirmed_count: confirmedCount,
       rejected_count: rejectedCount,
       confirmation_ratio: events.length > 0 ? confirmedCount / events.length : 0,
+      bsi_score: typeof night.bsiScore === 'number' ? night.bsiScore : null,
     };
 
     // Upsert night by (user_id, session_id) — each recording session = one cloud row, no overwrites
