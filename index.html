@@ -1413,23 +1413,17 @@ function _normalizeBuffer(buffer) {
 }
 
 async function preloadClipUrls(events) {
+  // Only store blob URLs here — decodeAudioData runs lazily on first Play tap.
+  // Calling decodeAudioData on a suspended AudioContext throws on some Android
+  // Chrome versions even with perfectly valid webm/opus blobs. Deferring decode
+  // until after ctx.resume() (triggered by the Play gesture) fixes this.
   for (const ev of events) {
     if (!ev.hasClip || _clipAudioCache[ev.id] || _clipUrlCache[ev.id]) continue;
     try {
       const blob = await loadClipBlob(ev.id, ev.clipPath);
-      if (!blob || blob.size < 100) continue; // skip empty/missing clips
-      try {
-        const ab = await blob.arrayBuffer();
-        const ctx = _getAudioCtx();
-        const audioBuffer = await ctx.decodeAudioData(ab);
-        _normalizeBuffer(audioBuffer); // boost to audible level in-place
-        _clipAudioCache[ev.id] = audioBuffer;
-      } catch(decodeErr) {
-        // decodeAudioData failed (old clip, unsupported codec, or suspended ctx) → blob URL fallback
-        console.warn('decodeAudioData failed for clip', ev.id, decodeErr.message);
-        _clipUrlCache[ev.id] = URL.createObjectURL(blob);
-      }
-    } catch(e) { /* loadClipBlob failed, skip */ }
+      if (!blob || blob.size < 100) continue;
+      _clipUrlCache[ev.id] = URL.createObjectURL(blob);
+    } catch(e) { /* skip */ }
   }
 }
 
@@ -1515,16 +1509,20 @@ function _launchBuffer(buffer, btn) {
   else { ctx.resume().then(doPlay).catch(() => { _pendingPlay = false; toast('Audio blocked — tap Play again'); _resetPlayButton(btn); }); }
 }
 
-// Fallback: re-try WebAudio decode (context is now running after user gesture, may succeed
-// even if preload decode failed on suspended context). Plain Audio as last resort.
-function _launchUrl(url, btn) {
+// Decode blob URL → AudioBuffer. Resume context and fetch run in parallel so that
+// decodeAudioData is always called on a running AudioContext — fixes Android Chrome
+// throwing on suspended ctx even for valid webm/opus blobs.
+// cacheId: if provided, decoded buffer is stored in _clipAudioCache for instant replay.
+function _launchUrl(url, btn, cacheId) {
   const ctx = _getAudioCtx();
-  fetch(url)
-    .then(r => r.arrayBuffer())
-    .then(ab => ctx.decodeAudioData(ab))
-    .then(buffer => { _normalizeBuffer(buffer); _launchBuffer(buffer, btn); })
+  Promise.all([ctx.resume(), fetch(url).then(r => r.arrayBuffer())])
+    .then(([, ab]) => ctx.decodeAudioData(ab))
+    .then(buffer => {
+      _normalizeBuffer(buffer);
+      if (cacheId != null) _clipAudioCache[cacheId] = buffer;
+      _launchBuffer(buffer, btn);
+    })
     .catch(() => {
-      // True last resort: plain Audio element (no gain boost)
       const audio = new Audio(url);
       _currentAudio = audio;
       btn.classList.add('clip-playing'); btn.dataset.playing = '1';
@@ -1549,9 +1547,9 @@ function playClip(eventId, btn) {
   const buffer = _clipAudioCache[id] || _clipAudioCache[eventId];
   if (buffer) { _launchBuffer(buffer, btn); return; }
 
-  // Fallback: blob URL — re-try WebAudio decode (context now running after gesture)
+  // Fallback: blob URL — decode now that context is running after gesture
   const url = _clipUrlCache[id] || _clipUrlCache[eventId];
-  if (url) { _launchUrl(url, btn); return; }
+  if (url) { _launchUrl(url, btn, id); return; }
 
   // Async fallback: clip not in cache (direct navigation without preload)
   (async () => {
@@ -1571,7 +1569,7 @@ function playClip(eventId, btn) {
       } catch(decodeErr) {
         const newUrl = URL.createObjectURL(blob);
         _clipUrlCache[numId] = newUrl;
-        _launchUrl(newUrl, btn);
+        _launchUrl(newUrl, btn, numId);
       }
     } catch(e) { toast('Error loading clip: ' + e.message); _resetPlayButton(btn); }
   })();
