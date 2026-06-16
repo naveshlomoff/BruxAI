@@ -1391,20 +1391,40 @@ function lbadge(l){if(l==='yes')return`<span class="tag" style="background:var(-
 //   Used when decodeAudioData fails (e.g. old unpatched clips with wrong duration).
 // Note: duration=0 patch in clipInitChunk means decodeAudioData now decodes the
 //   full clip (no longer truncates at the 1-2 s MediaRecorder header value).
-const PLAYBACK_GAIN = 8; // ~+18 dB; compensates raw mic level
+const PLAYBACK_GAIN = 30; // max normalization factor (~+30 dB) for quiet overnight recordings
+
+// Normalize AudioBuffer in-place to ~0.9 peak so even very quiet mic clips are audible.
+// Caps boost at PLAYBACK_GAIN to avoid blasting noise-only clips.
+// Returns false if clip is effectively silent (< 0.05% of full scale).
+function _normalizeBuffer(buffer) {
+  let peak = 0;
+  for (let c = 0; c < buffer.numberOfChannels; c++) {
+    const data = buffer.getChannelData(c);
+    for (let i = 0; i < data.length; i++) if (Math.abs(data[i]) > peak) peak = Math.abs(data[i]);
+  }
+  if (peak < 0.0005) return false;
+  const scale = Math.min(0.9 / peak, PLAYBACK_GAIN);
+  for (let c = 0; c < buffer.numberOfChannels; c++) {
+    const d = buffer.getChannelData(c);
+    for (let i = 0; i < d.length; i++) d[i] *= scale;
+  }
+  return true;
+}
+
 async function preloadClipUrls(events) {
   for (const ev of events) {
     if (!ev.hasClip || _clipAudioCache[ev.id] || _clipUrlCache[ev.id]) continue;
     try {
       const blob = await loadClipBlob(ev.id, ev.clipPath);
-      if (!blob) continue;
+      if (!blob || blob.size < 100) continue; // skip empty/missing clips
       try {
         const ab = await blob.arrayBuffer();
         const ctx = _getAudioCtx();
         const audioBuffer = await ctx.decodeAudioData(ab);
+        _normalizeBuffer(audioBuffer); // boost to audible level in-place
         _clipAudioCache[ev.id] = audioBuffer;
       } catch(decodeErr) {
-        // decodeAudioData failed (old clip, unsupported codec) → fall back to blob URL
+        // decodeAudioData failed (old clip, unsupported codec, or suspended ctx) → blob URL fallback
         console.warn('decodeAudioData failed for clip', ev.id, decodeErr.message);
         _clipUrlCache[ev.id] = URL.createObjectURL(blob);
       }
@@ -1435,6 +1455,7 @@ async function loadClipBlob(eventId, clipPath) {
 
 let _currentAudio = null;  // currently-playing HTML Audio element (fallback path)
 let _currentSource = null; // currently-playing AudioBufferSourceNode (primary path)
+let _pendingPlay = false;  // true while waiting for ctx.resume() — prevents double-play on rapid taps
 
 const _PLAY_SVG = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px"><path d="M5 3l14 9-14 9V3z"/></svg>';
 const _STOP_SVG = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
@@ -1446,38 +1467,55 @@ function _resetPlayButton(btn) {
 }
 
 function _stopPlayback() {
+  _pendingPlay = false; // cancel any in-flight resume→start chain
   if (_currentSource) { try { _currentSource.stop(); } catch(e) {} _currentSource = null; }
   if (_currentAudio)  { try { _currentAudio.pause(); } catch(e) {} _currentAudio  = null; }
   document.querySelectorAll('.clip-playing').forEach(_resetPlayButton);
 }
 
-// Gain-boosted playback via AudioBufferSourceNode (primary path).
-// ctx.resume() is called synchronously within the click handler (user gesture),
-// which unlocks the iOS AudioContext before any async work happens.
+// Playback via AudioBufferSourceNode. Level is already set by _normalizeBuffer (gain=1 here).
+// ctx.resume() is triggered by playClip synchronously in the user gesture (iOS requirement);
+// we wait for state='running' before calling source.start() to guarantee iOS plays audio.
+// _pendingPlay flag prevents double-play if user taps rapidly while context is resuming.
 function _launchBuffer(buffer, btn) {
   const ctx = _getAudioCtx();
-  ctx.resume(); // unlock iOS AudioContext — must be synchronous in user gesture
-  const source = ctx.createBufferSource();
-  source.buffer = buffer;
-  const gain = ctx.createGain();
-  gain.gain.value = PLAYBACK_GAIN;
-  source.connect(gain);
-  gain.connect(ctx.destination);
-  _currentSource = source;
-  btn.classList.add('clip-playing'); btn.dataset.playing = '1';
-  btn.innerHTML = _STOP_SVG + 'Stop';
-  source.onended = () => _stopPlayback();
-  source.start(0);
+  _pendingPlay = true;
+  const doPlay = () => {
+    if (!_pendingPlay) return; // _stopPlayback() called while waiting → abort
+    _pendingPlay = false;
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    const gain = ctx.createGain();
+    gain.gain.value = 1; // _normalizeBuffer already brought clip to ~0.9 peak
+    source.connect(gain);
+    gain.connect(ctx.destination);
+    _currentSource = source;
+    btn.classList.add('clip-playing'); btn.dataset.playing = '1';
+    btn.innerHTML = _STOP_SVG + 'Stop';
+    source.onended = () => _stopPlayback();
+    source.start(0);
+  };
+  if (ctx.state === 'running') { doPlay(); }
+  else { ctx.resume().then(doPlay).catch(() => { _pendingPlay = false; toast('Audio blocked — tap Play again'); _resetPlayButton(btn); }); }
 }
 
-// Fallback: plain Audio element (no gain boost) for clips that failed decodeAudioData.
+// Fallback: re-try WebAudio decode (context is now running after user gesture, may succeed
+// even if preload decode failed on suspended context). Plain Audio as last resort.
 function _launchUrl(url, btn) {
-  const audio = new Audio(url);
-  _currentAudio = audio;
-  btn.classList.add('clip-playing'); btn.dataset.playing = '1';
-  btn.innerHTML = _STOP_SVG + 'Stop';
-  audio.play().catch(e => { toast('Could not play audio: ' + e.message); _stopPlayback(); });
-  audio.onended = () => _stopPlayback();
+  const ctx = _getAudioCtx();
+  fetch(url)
+    .then(r => r.arrayBuffer())
+    .then(ab => ctx.decodeAudioData(ab))
+    .then(buffer => { _normalizeBuffer(buffer); _launchBuffer(buffer, btn); })
+    .catch(() => {
+      // True last resort: plain Audio element (no gain boost)
+      const audio = new Audio(url);
+      _currentAudio = audio;
+      btn.classList.add('clip-playing'); btn.dataset.playing = '1';
+      btn.innerHTML = _STOP_SVG + 'Stop';
+      audio.play().catch(e => { toast('Could not play audio: ' + e.message); _stopPlayback(); });
+      audio.onended = () => _stopPlayback();
+    });
 }
 
 function playClip(eventId, btn) {
@@ -1485,31 +1523,33 @@ function playClip(eventId, btn) {
   _stopPlayback();
   if (wasPlaying) return; // same button tapped → toggle off
 
+  // Resume AudioContext synchronously within user gesture — iOS requirement.
+  // _launchBuffer then waits for state='running' before calling source.start().
+  _getAudioCtx().resume();
+
   const id = parseInt(eventId) || eventId;
 
-  // Primary: gain-boosted AudioBuffer path
+  // Primary: normalized AudioBuffer path (pre-loaded by preloadClipUrls)
   const buffer = _clipAudioCache[id] || _clipAudioCache[eventId];
   if (buffer) { _launchBuffer(buffer, btn); return; }
 
-  // Fallback: blob URL → plain Audio element
+  // Fallback: blob URL — re-try WebAudio decode (context now running after gesture)
   const url = _clipUrlCache[id] || _clipUrlCache[eventId];
   if (url) { _launchUrl(url, btn); return; }
 
-  // Unlock AudioContext NOW — must be synchronous within the click handler (user gesture).
-  // _launchBuffer called later (after awaits) will find the context already resuming.
-  _getAudioCtx().resume();
-
-  // Async fallback: clip not yet in cache (e.g. direct navigation to report without preload)
+  // Async fallback: clip not in cache (direct navigation without preload)
   (async () => {
     try {
       btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="vertical-align:middle;margin-right:3px"><circle cx="12" cy="12" r="10"/></svg>Loading…';
       const ev = (_currentNight?.events || state.events).find(e => String(e.id) === String(eventId));
       const blob = await loadClipBlob(eventId, ev?.clipPath);
       if (!blob) { toast('Audio clip not available'); _resetPlayButton(btn); return; }
+      if (blob.size < 100) { toast('Clip is empty — event may have been too short'); _resetPlayButton(btn); return; }
       const numId = parseInt(eventId);
       try {
         const ab = await blob.arrayBuffer();
         const audioBuffer = await _getAudioCtx().decodeAudioData(ab);
+        _normalizeBuffer(audioBuffer);
         _clipAudioCache[numId] = audioBuffer;
         _launchBuffer(audioBuffer, btn);
       } catch(decodeErr) {
