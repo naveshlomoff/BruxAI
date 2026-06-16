@@ -1250,11 +1250,12 @@ async function saveEventClip(ev) {
     } else if (!_isWebm && state.clipInitChunk) {
       // iOS MP4: ftyp+moov has 0 audio → prepend is gapless ✓
       chunks = [state.clipInitChunk, ...state.rollingChunks.slice(startIdx)];
-    } else if (_isWebm && state.webmHeadersBlob) {
-      // Android webm: headers-only (no Cluster@0 audio) + trimmed clusters → gapless ✓
-      chunks = [state.webmHeadersBlob, ...state.rollingChunks.slice(startIdx)];
     } else {
-      // Fallback: all rolling chunks — long clip but always correct audio
+      // webm (Android) and unknown formats: always use the full rolling window.
+      // Trimmed webm clips prepend EBML headers to later Clusters whose timecodes
+      // are offset from t=0 by the elapsed recording time (e.g. 1800000 ms for a
+      // 30-min event). decodeAudioData allocates a buffer that large → OOM on mobile.
+      // Full rolling window (≤45 s) is always sequential and decodes cleanly.
       chunks = [...state.rollingChunks];
     }
     if (chunks.length === 0) return;
