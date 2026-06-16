@@ -1378,7 +1378,7 @@ async function renderEventsScreen() {
   // Awaiting here ensures the synchronous cache-hit path in playClip is always taken.
   // IndexedDB reads are fast (~1-5ms each) so this doesn't noticeably delay rendering.
   await preloadClipUrls(events);
-  list.innerHTML=events.map(ev=>`<div class="event-item"><div class="event-icon" style="background:var(--accentlt)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.2" stroke-linecap="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></div><div class="event-info"><div class="event-time">${ev.wallTime||ev.timeLabel} · ${ev.duration}s</div><div class="event-desc">${ev.peakHz} Hz · ${ev.dB} dB · raw score ${ev.bruxismScore}</div><div class="event-tags">${lbadge(ev.label)}<span class="tag" style="background:var(--hotlt);color:var(--hot)">${ev.duration>15?'long':ev.duration>5?'medium':'short'}</span><span class="tag" style="background:var(--accentlt);color:var(--accent2)">${ev.peakHz<500?'low-freq':ev.peakHz<2000?'mid-freq':'hi-freq'}</span></div><div class="confirm-row">${(ev.hasClip)?`<button class="cfm-btn" style="border-color:#c4b5fd;color:var(--accent2);flex:0 0 auto;padding:7px 10px" onclick="playClip('${ev.id}',this)"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px"><path d="M5 3l14 9-14 9V3z"/></svg>Play</button>`:'<span style="font-family:var(--mono);font-size:8px;color:var(--text3);align-self:center;flex:0 0 auto">no clip</span>'}<button class="cfm-btn cfm-yes ${ev.label==='yes'?'selected':''}" onclick="confirmEvent('${ev.id}','yes')">Bruxism</button><button class="cfm-btn cfm-no ${ev.label==='no'?'selected':''}" onclick="confirmEvent('${ev.id}','no')">Not bruxism</button><button class="cfm-btn cfm-maybe ${ev.label==='maybe'?'selected':''}" onclick="confirmEvent('${ev.id}','maybe')">Unsure</button></div></div></div>`).join('');
+  list.innerHTML=events.map(ev=>`<div class="event-item"><div class="event-icon" style="background:var(--accentlt)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.2" stroke-linecap="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></div><div class="event-info"><div class="event-time">${ev.wallTime||ev.timeLabel} · ${ev.duration}s</div><div class="event-desc">${ev.peakHz} Hz · ${ev.dB} dB · raw score ${ev.bruxismScore}</div><div class="event-tags">${lbadge(ev.label)}<span class="tag" style="background:var(--hotlt);color:var(--hot)">${ev.duration>15?'long':ev.duration>5?'medium':'short'}</span><span class="tag" style="background:var(--accentlt);color:var(--accent2)">${ev.peakHz<500?'low-freq':ev.peakHz<2000?'mid-freq':'hi-freq'}</span></div><div class="confirm-row">${(ev.hasClip)?`<span style="display:flex;flex-direction:column;flex:0 0 auto"><button class="cfm-btn" style="border-color:#c4b5fd;color:var(--accent2);padding:7px 10px" onclick="playClip('${ev.id}',this)"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px"><path d="M5 3l14 9-14 9V3z"/></svg>Play</button><div class="clip-pb" style="display:none;height:3px;background:var(--bg3);border-radius:2px;margin-top:3px;overflow:hidden"><div class="clip-pf" style="height:100%;width:0%;background:var(--accent2)"></div></div></span>`:'<span style="font-family:var(--mono);font-size:8px;color:var(--text3);align-self:center;flex:0 0 auto">no clip</span>'}<button class="cfm-btn cfm-yes ${ev.label==='yes'?'selected':''}" onclick="confirmEvent('${ev.id}','yes')">Bruxism</button><button class="cfm-btn cfm-no ${ev.label==='no'?'selected':''}" onclick="confirmEvent('${ev.id}','no')">Not bruxism</button><button class="cfm-btn cfm-maybe ${ev.label==='maybe'?'selected':''}" onclick="confirmEvent('${ev.id}','maybe')">Unsure</button></div></div></div>`).join('');
 }
 
 function lbadge(l){if(l==='yes')return`<span class="tag" style="background:var(--greenlt);color:var(--green)">confirmed</span>`;if(l==='no')return`<span class="tag" style="background:var(--redlt);color:var(--red)">rejected</span>`;if(l==='maybe')return`<span class="tag" style="background:var(--amberlt);color:var(--amber)">unsure</span>`;return`<span class="tag" style="background:var(--bg3);color:var(--text3)">unconfirmed</span>`;}
@@ -1456,6 +1456,7 @@ async function loadClipBlob(eventId, clipPath) {
 let _currentAudio = null;  // currently-playing HTML Audio element (fallback path)
 let _currentSource = null; // currently-playing AudioBufferSourceNode (primary path)
 let _pendingPlay = false;  // true while waiting for ctx.resume() — prevents double-play on rapid taps
+let _rafId = null;         // requestAnimationFrame id for progress bar animation
 
 const _PLAY_SVG = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px"><path d="M5 3l14 9-14 9V3z"/></svg>';
 const _STOP_SVG = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle;margin-right:3px"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
@@ -1468,6 +1469,8 @@ function _resetPlayButton(btn) {
 
 function _stopPlayback() {
   _pendingPlay = false; // cancel any in-flight resume→start chain
+  if (_rafId) { cancelAnimationFrame(_rafId); _rafId = null; }
+  document.querySelectorAll('.clip-pb').forEach(el => { el.style.display = 'none'; el.querySelector('.clip-pf').style.width = '0%'; });
   if (_currentSource) { try { _currentSource.stop(); } catch(e) {} _currentSource = null; }
   if (_currentAudio)  { try { _currentAudio.pause(); } catch(e) {} _currentAudio  = null; }
   document.querySelectorAll('.clip-playing').forEach(_resetPlayButton);
@@ -1492,6 +1495,18 @@ function _launchBuffer(buffer, btn) {
     _currentSource = source;
     btn.classList.add('clip-playing'); btn.dataset.playing = '1';
     btn.innerHTML = _STOP_SVG + 'Stop';
+    // Progress bar
+    const _pb = btn.parentElement?.querySelector('.clip-pb');
+    const _pf = _pb?.querySelector('.clip-pf');
+    if (_pb) _pb.style.display = 'block';
+    const _clipStart = ctx.currentTime;
+    const _totalDur = buffer.duration || 1;
+    const _tick = () => {
+      if (_currentSource !== source) return;
+      if (_pf) _pf.style.width = Math.min(100, ((ctx.currentTime - _clipStart) / _totalDur) * 100) + '%';
+      _rafId = requestAnimationFrame(_tick);
+    };
+    _rafId = requestAnimationFrame(_tick);
     source.onended = () => _stopPlayback();
     source.start(0);
   };
