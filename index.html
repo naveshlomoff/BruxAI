@@ -132,6 +132,19 @@ html, body {
 /* ── LIVE CANVAS ── */
 #live-canvas { width: 100%; height: 64px; display: block; border-radius: var(--r); background: var(--bg2); border: 0.5px solid var(--border); }
 
+/* ── PATCH (BLE hardware) CANVASES ── */
+.patch-canvas { width: 100%; height: 64px; display: block; border-radius: var(--r); background: var(--bg2); border: 0.5px solid var(--border); }
+
+/* ── PATCH SESSION REPORT MODAL + HISTORY ── */
+.patch-report-overlay { position: fixed; inset: 0; z-index: 1500; background: rgba(10,4,5,0.55); display: none; align-items: center; justify-content: center; padding: 20px; }
+.patch-report-overlay.show { display: flex; }
+.patch-report-card { background: var(--bg); border-radius: var(--r2); border: 0.5px solid var(--border2); padding: 22px 18px; width: 100%; max-width: 380px; max-height: 82vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.patch-report-close { float: right; background: none; border: none; font-family: var(--mono); font-size: 18px; color: var(--text3); cursor: pointer; line-height: 1; padding: 0 0 0 10px; }
+.patch-event-row { padding: 10px 2px; border-bottom: 0.5px solid var(--border); }
+.patch-event-row:last-child { border-bottom: none; }
+.patch-session-row { display: flex; justify-content: space-between; align-items: center; padding: 11px 2px; border-bottom: 0.5px solid var(--border); cursor: pointer; }
+.patch-session-row:last-child { border-bottom: none; }
+
 /* ── STATS GRID ── */
 .stats-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 8px; }
 .stat-card { background: var(--bg2); border-radius: var(--r); padding: 10px 6px; text-align: center; border: 0.5px solid var(--border); }
@@ -605,6 +618,62 @@ document.addEventListener('touchstart', function iosUnlock() {
     </div></div>
   </div>
 
+  <!-- ═══ SCREEN: PATCH (BroxMon hardware, isolated from the recorder above) ═══ -->
+  <div class="screen" id="screen-patch">
+    <div id="topbar">
+      <div>
+        <div class="app-title" style="color:var(--accent)">BSI-EBI Patch</div>
+        <div class="app-sub">Wearable sensor · Bluetooth</div>
+      </div>
+      <div id="patch-status" class="pill pill-red"><span class="pulse"></span>disconnected</div>
+    </div>
+    <div class="scroll"><div class="pad">
+
+      <div id="patch-unsupported" class="tip-box" style="display:none">
+        <b>Web Bluetooth not available.</b> Open this tab in Chrome or Edge on Android or a desktop computer — Safari and iOS do not support Bluetooth pairing from the browser.
+      </div>
+
+      <div class="card">
+        <button id="patch-connect-btn" onclick="patchToggleConnect()" style="width:100%;font-family:var(--mono);font-size:12px;padding:12px;border-radius:var(--r);background:var(--accent);color:#fff;border:none;cursor:pointer;letter-spacing:0.06em;text-transform:uppercase">Connect to patch</button>
+        <div class="stats-grid" style="margin-top:10px">
+          <div class="stat-card"><div class="stat-val" id="patch-stat-packets" style="color:var(--accent)">0</div><div class="stat-lbl">packets</div></div>
+          <div class="stat-card"><div class="stat-val" id="patch-stat-device" style="color:var(--text2);font-size:11px">—</div><div class="stat-lbl">device</div></div>
+          <div class="stat-card"><div class="stat-val" id="patch-stat-rec" style="color:var(--hot)">off</div><div class="stat-lbl">recording</div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="label">Microphone · 8 kHz</div>
+        <canvas id="patch-canvas-mic" class="patch-canvas"></canvas>
+        <div class="stat-lbl" style="text-align:right;margin-top:2px" id="patch-count-mic">0 samples</div>
+      </div>
+
+      <div class="card">
+        <div class="label">Accelerometer · 100 Hz</div>
+        <canvas id="patch-canvas-acc" class="patch-canvas"></canvas>
+        <div class="stat-lbl" style="text-align:right;margin-top:2px" id="patch-count-acc">0 samples</div>
+      </div>
+
+      <div class="card">
+        <div class="label">FSM pressure · 100 Hz</div>
+        <canvas id="patch-canvas-fsm" class="patch-canvas"></canvas>
+        <div class="stat-lbl" style="text-align:right;margin-top:2px" id="patch-count-fsm">0 samples</div>
+      </div>
+
+      <div class="card card-sm" style="background:var(--bg2)">
+        <div class="label" style="margin-bottom:6px">Session capture</div>
+        <button id="patch-record-btn" onclick="patchToggleRecording()" disabled style="width:100%;font-family:var(--mono);font-size:10px;padding:8px 14px;border-radius:8px;background:transparent;border:0.5px solid var(--border2);color:var(--text3);cursor:pointer;letter-spacing:0.06em;text-transform:uppercase">Start recording</button>
+        <div id="patch-download-row" style="display:none;gap:8px;margin-top:8px"></div>
+      </div>
+
+      <div class="label" style="margin-top:4px">Past sessions</div>
+      <div id="patch-sessions-list">
+        <div class="empty"><div class="empty-icon">◎</div><div class="empty-text">No patch sessions yet.</div></div>
+      </div>
+
+    </div></div>
+  </div>
+
   <!-- ── BOTTOM NAV ── -->
   <nav id="nav">
     <button class="nav-btn active" onclick="showScreen('record',this)">
@@ -619,6 +688,9 @@ document.addEventListener('touchstart', function iosUnlock() {
     <button class="nav-btn" onclick="showScreen('settings',this)">
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>Settings
     </button>
+    <button class="nav-btn" onclick="showScreen('patch',this)">
+      <svg viewBox="0 0 24 24"><path d="M6.5 6.5L17.5 17.5L12 23L12 1L17.5 6.5L6.5 17.5"/></svg>Patch
+    </button>
   </nav>
 
 </div>
@@ -628,6 +700,23 @@ document.addEventListener('touchstart', function iosUnlock() {
   <button class="close" onclick="document.getElementById('sync-error-banner').classList.remove('show')">×</button>
   <div class="title">Sync failed</div>
   <div id="sync-error-text"></div>
+</div>
+
+<!-- ═══ PATCH SESSION REPORT (isolated overlay, opens after a Patch recording stops) ═══ -->
+<div id="patch-report-overlay" class="patch-report-overlay">
+  <div class="patch-report-card">
+    <button class="patch-report-close" onclick="patchCloseReport()">×</button>
+    <div class="app-title" style="color:var(--accent)">Session report</div>
+    <div class="app-sub" id="patch-report-when">—</div>
+    <div class="stats-grid" style="margin-top:12px;margin-bottom:4px">
+      <div class="stat-card"><div class="stat-val" id="patch-report-count" style="color:var(--hot)">0</div><div class="stat-lbl">events</div></div>
+      <div class="stat-card"><div class="stat-val" id="patch-report-dur" style="color:var(--text2)">—</div><div class="stat-lbl">session length</div></div>
+    </div>
+    <div class="label" style="margin-top:10px">Detected events</div>
+    <div id="patch-report-events"></div>
+    <div class="label" style="margin-top:12px">Download raw data</div>
+    <div id="patch-report-downloads" style="display:flex;gap:8px"></div>
+  </div>
 </div>
 
 <script>
@@ -707,6 +796,7 @@ function showScreen(name,btn) {
   if(name==='events') renderEventsScreen();
   if(name==='history') renderHistoryScreen();
   if(name==='settings') renderStorageInfo();
+  if(name==='patch') renderPatchScreen();
 }
 
 async function toggleRecording() {
@@ -2182,6 +2272,475 @@ async function uploadClipToCloud(eventId, sessionId, nightCloudId, retries = 2) 
       }
     }
   } catch(e) { console.warn('uploadClipToCloud failed', e); }
+}
+
+// ═══ BSI-EBI PATCH (BroxMon BLE hardware) ═══
+// Isolated from the recorder/IndexedDB/Supabase code above: own state object, own DOM ids,
+// own functions (all prefixed patch...). Talks directly to the BroxMon hub (STM32WB5) via
+// Web Bluetooth. Nothing here reads or writes `state`, `db`, or Supabase.
+// UUIDs + 182-byte/91×uint16-LE packet format ported from broxmon_app/lib/ble_constants.dart
+// and broxmon_app/lib/services/ble_service.dart — keep in sync with the hub firmware.
+const PATCH_SERVICE_UUID = '0000fe40-cc7a-482a-984a-7f2ed5b3e58f';
+const PATCH_CHARS = {
+  acc: '0000fe41-0000-1000-8000-00805f9b34fb',
+  mic: '0000fe42-0000-1000-8000-00805f9b34fb',
+  fsm: '0000fe43-0000-1000-8000-00805f9b34fb',
+};
+const PATCH_BUFFER_MAX = 300;
+
+const patchState = {
+  device: null,
+  server: null,
+  connState: 'idle',      // idle | connecting | connected | disconnected
+  recording: false,
+  packetCount: 0,
+  buffers: { mic: [], acc: [], fsm: [] },
+  csvRows:  { mic: [], acc: [], fsm: [] },
+  buckets:  { mic: {}, acc: {}, fsm: {} },  // epochSecond -> {n,sum,sumSq,min,max}, recording-only, feeds the event detector
+  sessionStart: null,     // Date.now() when the current recording started; null when idle
+  reconnectTimer: null,
+};
+
+function patchDecodeUint16LE(dataView) {
+  const count = Math.floor(dataView.byteLength / 2);
+  const out = new Array(count);
+  for (let i = 0; i < count; i++) out[i] = dataView.getUint16(i * 2, true);
+  return out;
+}
+
+function patchPushSamples(channel, values) {
+  const buf = patchState.buffers[channel];
+  for (const v of values) {
+    buf.push(v);
+    if (buf.length > PATCH_BUFFER_MAX) buf.shift();
+  }
+  if (patchState.recording) {
+    for (const v of values) patchState.csvRows[channel].push(v);
+    patchUpdateBucket(channel, Date.now(), values);
+  }
+}
+
+// Aggregates one packet's samples into its wall-clock second: O(1) per sample, O(session
+// seconds) total memory — this is what the event detector runs over (see patchDetectChannelEvents),
+// kept separate from the flat csvRows array used for CSV export.
+function patchUpdateBucket(channel, ts, values) {
+  const key = Math.floor(ts / 1000);
+  const buckets = patchState.buckets[channel];
+  let b = buckets[key];
+  if (!b) b = buckets[key] = { n: 0, sum: 0, sumSq: 0 };
+  for (const v of values) {
+    b.n++; b.sum += v; b.sumSq += v * v;
+  }
+}
+
+function patchOnNotify(channel, event) {
+  const values = patchDecodeUint16LE(event.target.value);
+  patchPushSamples(channel, values);
+  patchState.packetCount++;
+  patchDrawChart(channel);
+  const countEl = document.getElementById('patch-count-' + channel);
+  if (countEl) countEl.textContent = patchState.buffers[channel].length + ' samples';
+  const pktEl = document.getElementById('patch-stat-packets');
+  if (pktEl) pktEl.textContent = patchState.packetCount;
+}
+
+function patchDrawChart(channel) {
+  const c = document.getElementById('patch-canvas-' + channel);
+  if (!c) return;
+  const ctx = c.getContext('2d');
+  const W = c.offsetWidth, H = 64;
+  c.width = W * (devicePixelRatio || 1); c.height = H * (devicePixelRatio || 1);
+  ctx.scale(devicePixelRatio || 1, devicePixelRatio || 1);
+  ctx.clearRect(0, 0, W, H);
+  const samples = patchState.buffers[channel];
+  if (!samples.length) return;
+  ctx.strokeStyle = '#a5b4fc'; ctx.lineWidth = 1.5; ctx.beginPath();
+  const step = W / samples.length;
+  samples.forEach((v, i) => {
+    const y = H - (v / 65535) * H;
+    const x = i * step;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
+
+function patchSetStatus(connState) {
+  patchState.connState = connState;
+  const pill = document.getElementById('patch-status');
+  const btn = document.getElementById('patch-connect-btn');
+  const recBtn = document.getElementById('patch-record-btn');
+  if (!pill) return;
+  const map = {
+    idle:         ['pill pill-red',   'disconnected'],
+    connecting:   ['pill pill-amber', 'connecting…'],
+    connected:    ['pill pill-green', 'connected'],
+    disconnected: ['pill pill-red',   'disconnected'],
+  };
+  const [cls, label] = map[connState] || map.idle;
+  pill.className = cls;
+  pill.innerHTML = '<span class="pulse"></span>' + label;
+  if (btn) btn.textContent = connState === 'connected' ? 'Disconnect' : (connState === 'connecting' ? 'Connecting…' : 'Connect to patch');
+  if (recBtn) recBtn.disabled = connState !== 'connected';
+}
+
+async function patchToggleConnect() {
+  if (patchState.connState === 'connected' || patchState.connState === 'connecting') {
+    await patchDisconnect();
+  } else {
+    await patchConnect();
+  }
+}
+
+async function patchConnect() {
+  if (!navigator.bluetooth) { toast('Web Bluetooth not available in this browser.'); return; }
+  try {
+    patchSetStatus('connecting');
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [PATCH_SERVICE_UUID] }],
+      optionalServices: [PATCH_SERVICE_UUID],
+    });
+    patchState.device = device;
+    device.addEventListener('gattserverdisconnected', patchHandleDisconnect);
+    const server = await device.gatt.connect();
+    patchState.server = server;
+    const service = await server.getPrimaryService(PATCH_SERVICE_UUID);
+    for (const [channel, uuid] of Object.entries(PATCH_CHARS)) {
+      const char = await service.getCharacteristic(uuid);
+      await char.startNotifications();
+      char.addEventListener('characteristicvaluechanged', (e) => patchOnNotify(channel, e));
+    }
+    const deviceNameEl = document.getElementById('patch-stat-device');
+    if (deviceNameEl) deviceNameEl.textContent = device.name || 'BroxMon';
+    patchSetStatus('connected');
+  } catch (e) {
+    console.warn('[patch] connect failed', e);
+    toast('Patch connection failed: ' + (e.message || e));
+    patchSetStatus('idle');
+  }
+}
+
+function patchHandleDisconnect() {
+  patchSetStatus('disconnected');
+  toast('Patch disconnected — retrying in 3s');
+  clearTimeout(patchState.reconnectTimer);
+  patchState.reconnectTimer = setTimeout(() => {
+    if (patchState.device && patchState.connState === 'disconnected') patchReconnect();
+  }, 3000);
+}
+
+async function patchReconnect() {
+  try {
+    patchSetStatus('connecting');
+    const server = await patchState.device.gatt.connect();
+    patchState.server = server;
+    const service = await server.getPrimaryService(PATCH_SERVICE_UUID);
+    for (const [channel, uuid] of Object.entries(PATCH_CHARS)) {
+      const char = await service.getCharacteristic(uuid);
+      await char.startNotifications();
+      char.addEventListener('characteristicvaluechanged', (e) => patchOnNotify(channel, e));
+    }
+    patchSetStatus('connected');
+  } catch (e) {
+    console.warn('[patch] reconnect failed', e);
+    patchState.reconnectTimer = setTimeout(() => patchReconnect(), 3000);
+  }
+}
+
+async function patchDisconnect() {
+  clearTimeout(patchState.reconnectTimer);
+  patchState.reconnectTimer = null;
+  const device = patchState.device;
+  patchState.device = null; // prevent auto-reconnect from firing
+  try { device?.removeEventListener('gattserverdisconnected', patchHandleDisconnect); } catch(e) {}
+  try { device?.gatt?.disconnect(); } catch(e) {}
+  patchState.server = null;
+  if (patchState.recording) patchToggleRecording();
+  patchSetStatus('idle');
+}
+
+function patchToggleRecording() {
+  patchState.recording = !patchState.recording;
+  const btn = document.getElementById('patch-record-btn');
+  const recStat = document.getElementById('patch-stat-rec');
+  if (patchState.recording) {
+    patchState.csvRows = { mic: [], acc: [], fsm: [] };
+    patchState.buckets = { mic: {}, acc: {}, fsm: {} };
+    patchState.sessionStart = Date.now();
+    if (btn) btn.textContent = 'Stop & download CSV';
+    if (recStat) recStat.textContent = 'on';
+    const row = document.getElementById('patch-download-row');
+    if (row) row.style.display = 'none';
+  } else {
+    if (btn) btn.textContent = 'Start recording';
+    if (recStat) recStat.textContent = 'off';
+    patchOfferDownloads();
+    patchFinishSession();
+  }
+}
+
+// container: a <div> to fill with 3 download buttons. rowsByChannel: optional {mic,acc,fsm}
+// raw-sample arrays to export (used for the report modal / re-opened history sessions); when
+// omitted, falls back to patchState.csvRows — the just-finished live session's data.
+function patchBuildCsvButtons(container, rowsByChannel) {
+  if (!container) return;
+  container.innerHTML = '';
+  container.style.display = 'flex';
+  const labels = { mic: 'Mic', acc: 'IMU', fsm: 'FSM' };
+  for (const channel of ['mic', 'acc', 'fsm']) {
+    const btn = document.createElement('button');
+    btn.textContent = labels[channel] + ' CSV';
+    btn.style.cssText = 'flex:1;font-family:var(--mono);font-size:10px;padding:8px 4px;border-radius:8px;background:transparent;border:0.5px solid var(--hotbd);color:var(--accent2);cursor:pointer;letter-spacing:0.04em;text-transform:uppercase';
+    btn.onclick = () => patchDownloadCsv(channel, rowsByChannel ? rowsByChannel[channel] : undefined);
+    container.appendChild(btn);
+  }
+}
+
+function patchOfferDownloads() {
+  patchBuildCsvButtons(document.getElementById('patch-download-row'));
+}
+
+function patchDownloadCsv(channel, rows) {
+  rows = rows || patchState.csvRows[channel];
+  if (!rows || !rows.length) { toast('No ' + channel + ' samples captured.'); return; }
+  const csv = rows.join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${channel}_patch_${ts}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// ── Event detection (post-session, runs once when recording stops) ──
+// Provisional thresholds — not yet calibrated against real hub sessions. threshAdd/threshMult
+// are grounded in the sensor's known ADC range (broxmon_app/lib/screens/main_screen.dart's
+// physicalMax: mic≈4096, acc≈35000, fsm≈3000) rather than picked arbitrarily, but WILL need
+// retuning once real recordings are reviewed — same iterative process analyzeLoop's dynThresh
+// already went through (see git log). Everything needed to retune lives in this one object.
+const PATCH_DETECT = {
+  mic: { threshMult: 1.5, threshAdd: 4096 * 0.02,  onsetSec: 2, offsetSec: 2, minDurSec: 1, maxDurSec: 20 },
+  acc: { threshMult: 1.4, threshAdd: 35000 * 0.02, onsetSec: 2, offsetSec: 2, minDurSec: 1, maxDurSec: 20 },
+  fsm: { threshMult: 1.4, threshAdd: 3000 * 0.03,  onsetSec: 2, offsetSec: 2, minDurSec: 1, maxDurSec: 20 },
+};
+
+// Walks one channel's per-second activity (stdev of that second's samples — scale/offset
+// independent, same reason analyzeLoop uses band energy rather than raw amplitude) against a
+// slow-adapting baseline, with onset/offset/min/max hysteresis shaped like analyzeLoop's proven
+// ONSET/OFFSET/MIN_DUR/MAX_DUR pattern (index.html ~1042-1159) — same technique, new isolated code.
+function patchDetectChannelEvents(channel, buckets, cfg) {
+  const keys = Object.keys(buckets).map(Number).sort((a, b) => a - b);
+  const events = [];
+  let baseline = null;
+  let onsetRun = 0, offsetRun = 0, inEvent = false, eventStartSec = null, peak = 0, lastKey = null;
+
+  function closeEvent(endSec) {
+    const durSec = endSec - eventStartSec + 1;
+    if (durSec >= cfg.minDurSec) {
+      events.push({ channel, start: new Date(eventStartSec * 1000), end: new Date(endSec * 1000), peak });
+    }
+    inEvent = false; onsetRun = 0; offsetRun = 0; peak = 0; eventStartSec = null;
+  }
+
+  for (const key of keys) {
+    // A gap (missed second — BLE hiccup) counts as quiet time for the offset hysteresis.
+    if (lastKey !== null && key - lastKey > 1 && inEvent) {
+      offsetRun += (key - lastKey - 1);
+      if (offsetRun >= cfg.offsetSec) closeEvent(lastKey);
+    }
+    const b = buckets[key];
+    const mean = b.sum / b.n;
+    const variance = Math.max(0, b.sumSq / b.n - mean * mean);
+    const activity = Math.sqrt(variance);
+    if (baseline === null) {
+      baseline = activity;
+    } else {
+      const alpha = activity < baseline ? 0.25 : 0.05;
+      baseline = baseline * (1 - alpha) + activity * alpha;
+    }
+    const dynThresh = baseline * cfg.threshMult + cfg.threshAdd;
+
+    if (activity > dynThresh) {
+      onsetRun++; offsetRun = 0; peak = Math.max(peak, activity);
+      if (!inEvent && onsetRun >= cfg.onsetSec) { inEvent = true; eventStartSec = key - cfg.onsetSec + 1; }
+      if (inEvent && (key - eventStartSec + 1) >= cfg.maxDurSec) closeEvent(key);
+    } else {
+      onsetRun = 0;
+      if (inEvent) { offsetRun++; if (offsetRun >= cfg.offsetSec) closeEvent(key); }
+    }
+    lastKey = key;
+  }
+  if (inEvent) closeEvent(lastKey);
+  return events;
+}
+
+// Merges candidate events across channels that overlap or sit within 2s of each other into one
+// reported event. Deliberately sensitive-by-default: a single-channel hit still gets reported
+// (confidence 'low') rather than silently dropped — matches BruxTrack's own philosophy of
+// surfacing candidates for the user to review rather than pretending certainty it doesn't have.
+function patchMergeEvents(perChannelEvents) {
+  const all = perChannelEvents.flat().sort((a, b) => a.start - b.start);
+  const merged = [];
+  for (const ev of all) {
+    const last = merged[merged.length - 1];
+    if (last && ev.start.getTime() - last.end.getTime() <= 2000) {
+      last.end = new Date(Math.max(last.end.getTime(), ev.end.getTime()));
+      if (!last.channels.includes(ev.channel)) last.channels.push(ev.channel);
+      last.peaks[ev.channel] = Math.max(last.peaks[ev.channel] || 0, ev.peak);
+    } else {
+      merged.push({ start: ev.start, end: ev.end, channels: [ev.channel], peaks: { [ev.channel]: ev.peak } });
+    }
+  }
+  merged.forEach(m => { m.confidence = m.channels.length >= 2 ? 'high' : 'low'; });
+  return merged;
+}
+
+function patchRunDetection() {
+  const perChannel = ['mic', 'acc', 'fsm'].map(
+    ch => patchDetectChannelEvents(ch, patchState.buckets[ch], PATCH_DETECT[ch])
+  );
+  return patchMergeEvents(perChannel);
+}
+
+// ── Session persistence — own IndexedDB database, entirely separate from BruxTrackDB ──
+// (openDB()/index.html:673-693). Zero risk to the existing schema: different database name,
+// own version counter, own store. Nothing here ever touches `db`/BruxTrackDB.
+let patchDb = null;
+function openPatchDB() {
+  if (patchDb) return Promise.resolve(patchDb);
+  return new Promise((res, rej) => {
+    const req = indexedDB.open('BroxMonPatchDB', 1);
+    req.onupgradeneeded = e => {
+      const d = e.target.result;
+      if (!d.objectStoreNames.contains('sessions')) d.createObjectStore('sessions', { keyPath: 'sessionId' });
+    };
+    req.onsuccess = e => { patchDb = e.target.result; res(patchDb); };
+    req.onerror = () => rej(req.error);
+  });
+}
+function patchDbPut(session) {
+  return openPatchDB().then(d => new Promise((res, rej) => {
+    const tx = d.transaction('sessions', 'readwrite');
+    tx.objectStore('sessions').put(session).onsuccess = () => res();
+    tx.onerror = () => rej(tx.error);
+  }));
+}
+function patchDbGetAll() {
+  return openPatchDB().then(d => new Promise((res, rej) => {
+    const tx = d.transaction('sessions', 'readonly');
+    const req = tx.objectStore('sessions').getAll();
+    req.onsuccess = () => res(req.result);
+    req.onerror = () => rej(req.error);
+  }));
+}
+
+// Runs once when a recording stops (called from patchToggleRecording): detects events over the
+// just-finished session's buckets, persists the session (events + a raw-sample snapshot, so
+// history entries can still be re-downloaded as CSV later), then opens the report window.
+async function patchFinishSession() {
+  const sessionStart = patchState.sessionStart;
+  const sessionEnd = Date.now();
+  if (!sessionStart) return; // nothing was actually recording (e.g. disconnect guard fired with no session open)
+  const events = patchRunDetection();
+  const session = {
+    sessionId: sessionStart,
+    startTime: sessionStart,
+    endTime: sessionEnd,
+    events: events.map(e => ({ start: e.start.getTime(), end: e.end.getTime(), channels: e.channels, confidence: e.confidence })),
+    raw: {
+      mic: patchState.csvRows.mic.slice(),
+      acc: patchState.csvRows.acc.slice(),
+      fsm: patchState.csvRows.fsm.slice(),
+    },
+  };
+  try { await patchDbPut(session); } catch (e) { console.warn('[patch] session save failed', e); }
+  patchState.sessionStart = null;
+  patchShowReport(session);
+  patchRenderSessionHistory();
+}
+
+function patchCloseReport() {
+  document.getElementById('patch-report-overlay')?.classList.remove('show');
+}
+
+function patchShowReport(session) {
+  const overlay = document.getElementById('patch-report-overlay');
+  if (!overlay) return;
+  const whenEl = document.getElementById('patch-report-when');
+  const countEl = document.getElementById('patch-report-count');
+  const durEl = document.getElementById('patch-report-dur');
+  const listEl = document.getElementById('patch-report-events');
+  const downloadsEl = document.getElementById('patch-report-downloads');
+
+  const start = new Date(session.startTime);
+  const durMin = Math.max(1, Math.round((session.endTime - session.startTime) / 60000));
+  if (whenEl) whenEl.textContent = start.toLocaleDateString() + ' · ' + start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (countEl) countEl.textContent = session.events.length;
+  if (durEl) durEl.textContent = durMin + ' min';
+
+  if (listEl) {
+    listEl.innerHTML = '';
+    if (!session.events.length) {
+      listEl.innerHTML = '<div class="empty"><div class="empty-icon">◎</div><div class="empty-text">No events detected this session.</div></div>';
+    } else {
+      session.events.slice().sort((a, b) => a.start - b.start).forEach(ev => {
+        const durSec = Math.max(1, Math.round((ev.end - ev.start) / 1000));
+        const time = new Date(ev.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const badgeColor = ev.confidence === 'high' ? ['var(--greenlt)', 'var(--green)'] : ['var(--amberlt)', 'var(--amber)'];
+        const row = document.createElement('div');
+        row.className = 'patch-event-row';
+        row.innerHTML = `<div class="event-time">${time} · ${durSec}s</div>
+          <div class="event-desc">${ev.channels.join(' + ')} &nbsp;
+            <span class="tag" style="background:${badgeColor[0]};color:${badgeColor[1]}">${ev.confidence} confidence</span>
+          </div>`;
+        listEl.appendChild(row);
+      });
+    }
+  }
+  patchBuildCsvButtons(downloadsEl, session.raw);
+  overlay.classList.add('show');
+}
+
+async function patchRenderSessionHistory() {
+  const listEl = document.getElementById('patch-sessions-list');
+  if (!listEl) return;
+  let sessions = [];
+  try { sessions = await patchDbGetAll(); } catch (e) { console.warn('[patch] history load failed', e); }
+  sessions.sort((a, b) => b.startTime - a.startTime);
+  if (!sessions.length) {
+    listEl.innerHTML = '<div class="empty"><div class="empty-icon">◎</div><div class="empty-text">No patch sessions yet.</div></div>';
+    return;
+  }
+  listEl.innerHTML = '';
+  sessions.forEach(s => {
+    const dt = new Date(s.startTime);
+    const durMin = Math.max(1, Math.round((s.endTime - s.startTime) / 60000));
+    const row = document.createElement('div');
+    row.className = 'patch-session-row';
+    row.innerHTML = `<div><div class="event-time">${dt.toLocaleDateString()} · ${dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+        <div class="stat-lbl">${durMin} min session</div></div>
+      <div class="pill pill-purple">${s.events.length} events</div>`;
+    row.onclick = () => patchShowReport(s);
+    listEl.appendChild(row);
+  });
+}
+
+function renderPatchScreen() {
+  const unsupported = document.getElementById('patch-unsupported');
+  const connectBtn = document.getElementById('patch-connect-btn');
+  if (!navigator.bluetooth) {
+    if (unsupported) unsupported.style.display = 'block';
+    if (connectBtn) connectBtn.disabled = true;
+  } else {
+    if (unsupported) unsupported.style.display = 'none';
+    if (connectBtn) connectBtn.disabled = false;
+  }
+  patchSetStatus(patchState.connState);
+  for (const channel of ['mic', 'acc', 'fsm']) patchDrawChart(channel);
+  patchRenderSessionHistory();
 }
 
 async function init(){
