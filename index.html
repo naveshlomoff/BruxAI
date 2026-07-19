@@ -2391,6 +2391,35 @@ async function patchToggleConnect() {
   }
 }
 
+// Real BLE peripherals (this hub included) frequently accept the GATT connection and then
+// immediately drop it if queried for services too quickly — Chrome/Edge surface this as
+// "GATT Server is disconnected. Cannot retrieve services." A short settle delay plus a few
+// retries clears this in practice; it is not a sign the UUIDs or the device are wrong.
+async function patchConnectGatt(device, attempts = 3) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const server = await device.gatt.connect();
+      await new Promise(r => setTimeout(r, 350)); // let the peripheral settle before service discovery
+      const service = await server.getPrimaryService(PATCH_SERVICE_UUID);
+      return { server, service };
+    } catch (e) {
+      lastErr = e;
+      try { device.gatt.disconnect(); } catch (_) {}
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+  throw lastErr;
+}
+
+async function patchSubscribeAll(service) {
+  for (const [channel, uuid] of Object.entries(PATCH_CHARS)) {
+    const char = await service.getCharacteristic(uuid);
+    await char.startNotifications();
+    char.addEventListener('characteristicvaluechanged', (e) => patchOnNotify(channel, e));
+  }
+}
+
 async function patchConnect() {
   if (!navigator.bluetooth) { toast('Web Bluetooth not available in this browser.'); return; }
   try {
@@ -2406,14 +2435,9 @@ async function patchConnect() {
     });
     patchState.device = device;
     device.addEventListener('gattserverdisconnected', patchHandleDisconnect);
-    const server = await device.gatt.connect();
+    const { server, service } = await patchConnectGatt(device);
     patchState.server = server;
-    const service = await server.getPrimaryService(PATCH_SERVICE_UUID);
-    for (const [channel, uuid] of Object.entries(PATCH_CHARS)) {
-      const char = await service.getCharacteristic(uuid);
-      await char.startNotifications();
-      char.addEventListener('characteristicvaluechanged', (e) => patchOnNotify(channel, e));
-    }
+    await patchSubscribeAll(service);
     const deviceNameEl = document.getElementById('patch-stat-device');
     if (deviceNameEl) deviceNameEl.textContent = device.name || 'BroxMon';
     patchSetStatus('connected');
@@ -2436,14 +2460,9 @@ function patchHandleDisconnect() {
 async function patchReconnect() {
   try {
     patchSetStatus('connecting');
-    const server = await patchState.device.gatt.connect();
+    const { server, service } = await patchConnectGatt(patchState.device);
     patchState.server = server;
-    const service = await server.getPrimaryService(PATCH_SERVICE_UUID);
-    for (const [channel, uuid] of Object.entries(PATCH_CHARS)) {
-      const char = await service.getCharacteristic(uuid);
-      await char.startNotifications();
-      char.addEventListener('characteristicvaluechanged', (e) => patchOnNotify(channel, e));
-    }
+    await patchSubscribeAll(service);
     patchSetStatus('connected');
   } catch (e) {
     console.warn('[patch] reconnect failed', e);
