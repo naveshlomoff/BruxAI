@@ -2395,8 +2395,13 @@ async function patchConnect() {
   if (!navigator.bluetooth) { toast('Web Bluetooth not available in this browser.'); return; }
   try {
     patchSetStatus('connecting');
+    // acceptAllDevices, not a service-UUID filter: the hub's ADV packet likely doesn't include
+    // the 128-bit custom service UUID (common — it would eat the whole legacy 31-byte payload),
+    // same reason the Flutter prototype's own scan (ble_service.dart startScan()) filters by
+    // nothing and matches by name instead. optionalServices is still required so GATT can reach
+    // the service once connected, even though it wasn't used to filter the chooser.
     const device = await navigator.bluetooth.requestDevice({
-      filters: [{ services: [PATCH_SERVICE_UUID] }],
+      acceptAllDevices: true,
       optionalServices: [PATCH_SERVICE_UUID],
     });
     patchState.device = device;
