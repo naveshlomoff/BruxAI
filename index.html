@@ -1149,11 +1149,10 @@ function analyzeLoop() {
     if (state.noiseFloor > thresh) state.noiseFloor = thresh;
   }
   const nf = state.noiseFloor || 0;
-  // dynThresh v8: multiplier 1.4→1.3, offset 3→2. Floor capped at thresh (21 at sens=70).
-  // At nf=18 (fresh start): dynThresh=max(21,25.4)=25.4. Grinding(33)>25.4 → detected ✓
-  // At nf=21 (cap): dynThresh=max(21,29.3)=29.3. Grinding(33)>29.3 → detected ✓
-  // Breathing/ambient (22-24) < 25.4 → rejected ✓
-  const dynThresh = Math.max(thresh, nf * 1.3 + 2);
+  // dynThresh v6 (restored): multiplier 1.2, offset 2. Floor capped at thresh (21 at sens=70).
+  // Max possible dynThresh = thresh*1.2+2 = 27.2. Grinding at 28+ always detectable.
+  // At nf=18 (fresh start): dynThresh=max(21,23.6)=23.6. Grinding(33)>23.6 → detected ✓
+  const dynThresh = Math.max(thresh, nf * 1.2 + 2);
   // Detect on bruxBand (= (lowMid+midBand)/2). This is the "avg" shown in the debug bar.
   let cand = (bruxBand > dynThresh);
   let rejReason = '';
@@ -1178,17 +1177,10 @@ function analyzeLoop() {
   // GRACE_MS, _recAge, and _inGrace are pre-computed above (before the floor update)
   // because the floor guard also depends on _inGrace.
   if(cand && _inGrace){ cand=false; rejReason='grace'; }
-  // ONSET=12 (~200ms sustained signal to open event):
-  //   Filters brief transients (tap, rustle, click) which last <150ms.
-  //   Real grinding and sustained ambient noise both clear this easily.
-  //
-  // OFFSET=15 (~250ms silence to close event):
-  //   Prevents a momentary gap mid-grind from splitting one episode into two.
-  //
-  // MIN_DUR=3.0s: reject events shorter than 3 seconds.
-  //   Real bruxism lasts 3-15s. Brief noise bursts (cough, movement) that pass
-  //   ONSET but stop quickly are filtered here.
-  const ONSET=12, OFFSET=15, MIN=12, MAX_DUR_MS=15000;
+  // ONSET=8 (~130ms sustained signal to open event).
+  // OFFSET=12 (~200ms silence to close event).
+  // MIN_DUR=2.0s: reject events shorter than 2 seconds.
+  const ONSET=8, OFFSET=12, MIN=8, MAX_DUR_MS=15000;
   if(cand) {
     state.eventFrames++; state.silenceFrames=0;
     if(!state.inEvent && state.eventFrames>=ONSET) { state.inEvent=true; state.eventStart=Date.now(); }
@@ -1203,7 +1195,7 @@ function analyzeLoop() {
       state.silenceFrames++;
       if(state.silenceFrames>=OFFSET) {
         const dur=(Date.now()-state.eventStart)/1000;
-        if(state.eventFrames>=MIN && dur>=3.0) registerEvent(dur,peakBruxHz,bruxBandFull,dB);
+        if(state.eventFrames>=MIN && dur>=2.0) registerEvent(dur,peakBruxHz,bruxBandFull,dB);
         state.inEvent=false; state.eventFrames=0;
       }
     } else {
