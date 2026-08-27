@@ -847,11 +847,18 @@ async function startRecording() {
   state.waveformData = new Float32Array(state.analyser.fftSize);
   // Always run MediaRecorder for event clips (rolling 1-second chunks)
   try {
-    const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' :
-                 MediaRecorder.isTypeSupported('audio/mp4;codecs=mp4a.40.2') ? 'audio/mp4;codecs=mp4a.40.2' :
-                 MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : 'audio/webm';
-    state.clipMime = mime;
-    state.mediaRecorder = new MediaRecorder(state.mediaStream,{mimeType:mime});
+    // Try each MIME type with a real constructor call (isTypeSupported can lie on some browsers).
+    // Fall through to no-mimeType as last resort so the browser picks a supported format.
+    const _mimes = ['audio/webm;codecs=opus','audio/mp4;codecs=mp4a.40.2','audio/mp4','audio/ogg;codecs=opus','audio/webm'];
+    let _mrErr;
+    for (const _m of _mimes) {
+      try { state.mediaRecorder = new MediaRecorder(state.mediaStream,{mimeType:_m}); state.clipMime=_m; _mrErr=null; break; } catch(e){ _mrErr=e; }
+    }
+    if (_mrErr) {
+      // Last resort: let the browser choose the format
+      state.mediaRecorder = new MediaRecorder(state.mediaStream);
+      state.clipMime = state.mediaRecorder.mimeType || 'audio/webm';
+    }
     state.rollingChunks = []; // rolling window: last ~20 s of 1-s slices
     state.chunkTimestamps = [];
     state.clipInitChunk = null; // ftyp+moov header (iOS MP4 chunk[0]) — must prepend to all trimmed clips
