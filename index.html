@@ -735,7 +735,7 @@ const state = {
   animFrame: null, timerInterval: null, draftTimer: null, cloudSyncTimer: null,
   inEvent: false, eventStart: 0, silenceFrames: 0, eventFrames: 0,
   waveformData: new Float32Array(256), freqData: new Uint8Array(2048),
-  settings: { filterSnore:true, filterImpact:true, filterSpeech:true, saveClips:true, sensitivity:70, placement:'pillow', reportTime:'07:00' },
+  settings: { filterSnore:false, filterImpact:true, filterSpeech:false, saveClips:true, sensitivity:70, placement:'pillow', reportTime:'07:00' },
   user: null, syncStatus: 'idle', lastSyncError: null
 };
 let _wakeLock = null;
@@ -1108,7 +1108,7 @@ function analyzeLoop() {
   const thresh=Math.round(9+((sens-20)/75)*18);
   // ── GRACE PERIOD (pre-computed before floor update so floor can be gated on it) ───────────
   // MUST be computed before the noise floor block.
-  const GRACE_MS = 30 * 1000; // 30 sec: enough for phone placement, short enough for daytime tests
+  const GRACE_MS = 15 * 1000; // 15 sec: enough to place phone, short enough to test quickly
   const _recAge = Date.now() - (state.startTime || Date.now());
   const _inGrace = _recAge < GRACE_MS && !state.skipGrace;
   // ── NOISE FLOOR (v5.14) ──────────────────────────────────────────────────────────────────
@@ -1237,7 +1237,13 @@ function analyzeLoop() {
     // Show/hide skip button during grace period
     const _skipWrap = document.getElementById('grace-skip-wrap');
     if (_skipWrap) _skipWrap.style.display = (_graceLeft > 0 && !state.skipGrace) ? 'block' : 'none';
-    _d.innerHTML = `ctx:<b>${ctxState}</b> · dB:<b>${dB}</b> · bx:<b>${peakBrux}</b> avg:<b>${Math.round(bruxBand)}</b> · floor:<b style="color:var(--text2)">${Math.round(nf)}</b> dyn:<b style="color:var(--accent)">${Math.round(dynThresh)}</b> <span style="color:${_gapColor}">gap:${_gap>0?'+':''}${_gap}</span>${_graceSuffix}<br>ba:<b>${Math.round(bass)}</b> lo:<b>${Math.round(lowMid)}</b> <span style="color:var(--text3)">ba/lo:${_baLoRatio}</span> · snr:${Math.round(snoreBand)} · hi:${Math.round(presence)} · <b>${ind}</b>`;
+    // Big status line — shows clearly what's blocking detection (if anything)
+    const _filterWhy = (state.settings.filterSnore && snoreBand>peakBrux*1.5 && snoreBand>40)
+      ? `<span style="color:var(--red);font-size:11px">⚠ snore filter blocking (snr:${Math.round(snoreBand)} > bx:${Math.round(peakBrux)}×1.5) — disable in Settings</span>`
+      : (state.settings.filterSpeech && presence > midBand*1.6 && presence > 55)
+      ? `<span style="color:var(--red);font-size:11px">⚠ speech filter blocking (hi:${Math.round(presence)} > mid:${Math.round(midBand)}×1.6) — disable in Settings</span>`
+      : '';
+    _d.innerHTML = `ctx:<b>${ctxState}</b> · dB:<b>${dB}</b> · avg:<b>${Math.round(bruxBand)}</b>/<b style="color:var(--accent)">${Math.round(dynThresh)}</b> <span style="color:${_gapColor}">gap:${_gap>0?'+':''}${_gap}</span>${_graceSuffix}<br>${_filterWhy || `ba:<b>${Math.round(bass)}</b> snr:<b>${Math.round(snoreBand)}</b> hi:<b>${Math.round(presence)}</b>`} · <b>${ind}</b>`;
   }
   // Visual level bars
   const dbEl = document.getElementById('level-db');
@@ -1258,6 +1264,19 @@ function analyzeLoop() {
   }
   document.getElementById('stat-db').textContent = dB>-80?dB+' dB':'—';
   document.getElementById('stat-freq').textContent = peakHz>50?peakHz+' Hz':'—';
+  // Glow the record ring when grinding signal is near threshold — gives real-time visual feedback
+  const _ring = document.getElementById('record-ring');
+  if (_ring && state.recording) {
+    const _ratio = bruxBand / dynThresh;
+    if (state.inEvent) {
+      _ring.style.boxShadow = '0 0 0 4px var(--red), 0 0 24px 8px rgba(192,30,46,0.4)';
+    } else if (_ratio > 0.7) {
+      const _intensity = Math.round(Math.min(1, (_ratio - 0.7) / 0.3) * 40) + 8;
+      _ring.style.boxShadow = `0 0 0 3px var(--hot), 0 0 ${_intensity}px 4px rgba(192,30,46,0.3)`;
+    } else {
+      _ring.style.boxShadow = '';
+    }
+  }
   drawWaveform();
   state.animFrame = requestAnimationFrame(analyzeLoop);
 }
@@ -1807,7 +1826,16 @@ async function loadFromCloud() {
   } catch(e) { toast('Restore failed: ' + e.message); }
 }
 function saveSettings(){localStorage.setItem('bruxtrack-settings',JSON.stringify(state.settings));}
-function loadSettings(){try{const s=JSON.parse(localStorage.getItem('bruxtrack-settings')||'{}');Object.assign(state.settings,s);if(state.settings.sensitivity){document.getElementById('sensitivity').value=state.settings.sensitivity;document.getElementById('sens-val').textContent=state.settings.sensitivity;}if(state.settings.reportTime)document.getElementById('report-time').value=state.settings.reportTime;}catch(e){}}
+function loadSettings(){try{const s=JSON.parse(localStorage.getItem('bruxtrack-settings')||'{}');Object.assign(state.settings,s);
+  // v0.3.2 migration: filters caused false rejections — reset them to OFF for all existing users.
+  // Users who want them can re-enable in Settings. The settingsVer key prevents re-resetting.
+  if (!s.settingsVer || s.settingsVer < 2) {
+    state.settings.filterSnore = false;
+    state.settings.filterSpeech = false;
+    state.settings.settingsVer = 2;
+    saveSettings();
+  }
+  if(state.settings.sensitivity){document.getElementById('sensitivity').value=state.settings.sensitivity;document.getElementById('sens-val').textContent=state.settings.sensitivity;}if(state.settings.reportTime)document.getElementById('report-time').value=state.settings.reportTime;}catch(e){}}
 document.getElementById('sensitivity').addEventListener('change',()=>{state.settings.sensitivity=parseInt(document.getElementById('sensitivity').value);saveSettings();});
 document.getElementById('report-time').addEventListener('change',()=>{state.settings.reportTime=document.getElementById('report-time').value;saveSettings();});
 async function requestNotif(){if('Notification'in window){const p=await Notification.requestPermission();if(p==='granted'){document.getElementById('notif-banner').style.display='none';toast('Notifications enabled — morning report scheduled');}}}
