@@ -1000,11 +1000,9 @@ async function stopRecording() {
   if(state.audioCtx) { state.audioCtx.close(); state.audioCtx = null; }
   updateRecordUI(false);
   // Wait for in-flight saveEventClip calls before nulling media refs.
-  // saveEventClip has a 1200ms internal delay to catch the final chunk.
-  // If we null state.mediaRecorder here (before the wait), saveEventClip's
-  // early-return guard fires and the clip is never saved → hasClip stays false.
-  // Fix: keep media refs alive through the wait, null them after.
-  await new Promise(r => setTimeout(r, 1500));
+  // saveEventClip waits 1200ms for the final chunk + up to 2s for _clipInitReady + clip assembly.
+  // 3000ms gives comfortable margin for slow devices, ensuring ev.hasClip=true before snapshot.
+  await new Promise(r => setTimeout(r, 3000));
   // NOW safe to null — all in-flight clip saves have completed
   state.mediaRecorder = null;
   state.mediaStream = null;
@@ -1512,7 +1510,17 @@ function _normalizeBuffer(buffer) {
 
 async function preloadClipUrls(events) {
   for (const ev of events) {
-    if (!ev.hasClip || _clipAudioCache[ev.id] || _clipUrlCache[ev.id]) continue;
+    if (_clipAudioCache[ev.id] || _clipUrlCache[ev.id]) continue;
+    // If hasClip is false, the clip might still exist in IndexedDB — the async save completed
+    // but the hasClip flag wasn't flushed to the stored night (timing race on stopRecording).
+    // Check IndexedDB directly and heal the flag so the Play button appears.
+    if (!ev.hasClip) {
+      try {
+        const local = await dbGet('clips', parseInt(ev.id));
+        if (!local?.blob || local.blob.size < 100) continue; // truly no clip
+        ev.hasClip = true; // heal: clip exists, flag just wasn't persisted
+      } catch(e) { continue; }
+    }
     try {
       const blob = await loadClipBlob(ev.id, ev.clipPath);
       if (!blob || blob.size < 100) continue; // skip empty/missing clips
