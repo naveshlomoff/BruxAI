@@ -360,6 +360,7 @@ document.addEventListener('touchstart', function iosUnlock() {
     <div class="auth-spinner"></div>
     <div id="auth-msg"></div>
     <button id="auth-retry-btn" onclick="signInAnonymous()" style="display:none">Retry</button>
+    <button id="auth-offline-btn" onclick="useOffline()" style="display:none;margin-top:8px;background:none;border:1px solid var(--text3);color:var(--text2);font-size:12px;padding:8px 20px;border-radius:8px;cursor:pointer">המשך ללא חיבור</button>
   </div>
 </div>
 
@@ -1865,21 +1866,33 @@ function initSupabase() {
   }
 }
 
+function useOffline() {
+  document.getElementById('auth-overlay').classList.add('hidden');
+  // app works fully offline — Supabase sync just won't happen until next session
+}
+
 async function signInAnonymous() {
   const msg = document.getElementById('auth-msg');
   const status = document.getElementById('auth-status-text');
   const spinner = document.querySelector('.auth-spinner');
   const retry = document.getElementById('auth-retry-btn');
+  const offlineBtn = document.getElementById('auth-offline-btn');
   msg.className = ''; msg.textContent = '';
   status.textContent = 'Creating your private account…';
   spinner.classList.remove('hidden');
   retry.style.display = 'none';
+  offlineBtn.style.display = 'none';
+  // Show offline fallback if auth takes too long
+  const offlineTimer = setTimeout(() => { offlineBtn.style.display = 'block'; }, 8000);
   try {
     const { data, error } = await supabase.auth.signInAnonymously();
+    clearTimeout(offlineTimer);
     if (error) throw error;
     // onAuthStateChange will fire SIGNED_IN and hide the overlay
   } catch(e) {
+    clearTimeout(offlineTimer);
     spinner.classList.add('hidden');
+    offlineBtn.style.display = 'block';
     msg.className = 'error';
     const m = e.message || '';
     if (m.toLowerCase().includes('anonymous') && (m.toLowerCase().includes('disabled') || m.toLowerCase().includes('not enabled'))) {
