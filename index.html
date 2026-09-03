@@ -2451,7 +2451,7 @@ async function patchConnectGatt(device, attempts = 4) {
   for (let i = 0; i < attempts; i++) {
     try {
       const server = await device.gatt.connect();
-      await new Promise(r => setTimeout(r, 1300)); // clear the hub's 1s post-connect L2CAP renegotiation
+      await new Promise(r => setTimeout(r, 2000)); // clear the hub's 1s post-connect L2CAP renegotiation, with margin
       const service = await server.getPrimaryService(PATCH_SERVICE_UUID);
       return { server, service };
     } catch (e) {
