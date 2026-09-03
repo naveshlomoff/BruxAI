@@ -2438,16 +2438,20 @@ async function patchToggleConnect() {
   }
 }
 
-// Real BLE peripherals (this hub included) frequently accept the GATT connection and then
-// immediately drop it if queried for services too quickly — Chrome/Edge surface this as
-// "GATT Server is disconnected. Cannot retrieve services." A short settle delay plus a few
-// retries clears this in practice; it is not a sign the UUIDs or the device are wrong.
-async function patchConnectGatt(device, attempts = 3) {
+// The hub's firmware (BroxMon_Firmware/.../App/app_ble.c) arms a one-shot timer on every BLE
+// connect: exactly 1000ms later it fires an L2CAP connection-parameter-update request (down to a
+// 7.5-10ms interval, "critical for reliable 8kHz audio streaming" per its own comment). If
+// Chrome/Edge is still mid service-discovery when that request lands, Windows' Bluetooth stack
+// tears the GATT session down — surfaced here as "GATT Server is disconnected. Cannot retrieve
+// services." Confirmed against the firmware source, not a guess; not a sign the UUIDs or the
+// device are wrong. Waiting the discovery out past the 1s mark avoids the collision — and since
+// each retry's device.gatt.connect() re-arms the hub's timer, the same wait applies every time.
+async function patchConnectGatt(device, attempts = 4) {
   let lastErr;
   for (let i = 0; i < attempts; i++) {
     try {
       const server = await device.gatt.connect();
-      await new Promise(r => setTimeout(r, 350)); // let the peripheral settle before service discovery
+      await new Promise(r => setTimeout(r, 1300)); // clear the hub's 1s post-connect L2CAP renegotiation
       const service = await server.getPrimaryService(PATCH_SERVICE_UUID);
       return { server, service };
     } catch (e) {
