@@ -2471,13 +2471,16 @@ async function patchConnect() {
   if (!navigator.bluetooth) { toast('Web Bluetooth not available in this browser.'); return; }
   try {
     patchSetStatus('connecting');
-    // acceptAllDevices, not a service-UUID filter: the hub's ADV packet likely doesn't include
-    // the 128-bit custom service UUID (common — it would eat the whole legacy 31-byte payload),
-    // same reason the Flutter prototype's own scan (ble_service.dart startScan()) filters by
-    // nothing and matches by name instead. optionalServices is still required so GATT can reach
-    // the service once connected, even though it wasn't used to filter the chooser.
+    // Filter by name, not the 128-bit custom service UUID: confirmed against the firmware's own
+    // advertising packet (BroxMon_Firmware/.../App/app_ble.c, a_AdvData[]) that the hub advertises
+    // a different, unrelated 16-bit UUID (0xAA01 — a CubeMX template leftover) — the real GATT
+    // service (0000fe40-...) is only visible after connecting, never in the ADV payload, so a
+    // services filter here can never match. The same ADV packet does carry
+    // AD_TYPE_COMPLETE_LOCAL_NAME "BroxMon01", which is what's filtered on below — this also
+    // keeps the chooser from listing every unrelated BLE device in range.
+    // optionalServices is still required so GATT can reach the service once connected.
     const device = await navigator.bluetooth.requestDevice({
-      acceptAllDevices: true,
+      filters: [{ namePrefix: 'BroxMon' }],
       optionalServices: [PATCH_SERVICE_UUID],
     });
     patchState.device = device;
