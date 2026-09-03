@@ -634,6 +634,13 @@ document.addEventListener('touchstart', function iosUnlock() {
         <b>Web Bluetooth not available.</b> Open this tab in Chrome or Edge on Android or a desktop computer — Safari and iOS do not support Bluetooth pairing from the browser.
       </div>
 
+      <div class="tip-box">
+        <b>Works on iPhone too, via the BroxMon Bridge:</b> a small ESP32 relay talks Bluetooth to
+        the patch directly and hands the data to any browser over Wi-Fi — no Web Bluetooth needed
+        at all. If one is set up, join its network and open <b>http://broxmon.local/</b> instead
+        of this tab. Setup: <code>patch-bridge/README.md</code> in the repo.
+      </div>
+
       <div class="card">
         <button id="patch-connect-btn" onclick="patchToggleConnect()" style="width:100%;font-family:var(--mono);font-size:12px;padding:12px;border-radius:var(--r);background:var(--accent);color:#fff;border:none;cursor:pointer;letter-spacing:0.06em;text-transform:uppercase">Connect to patch</button>
         <div class="stats-grid" style="margin-top:10px">

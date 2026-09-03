@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>BroxMon Bridge</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Syne:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+/* Ported 1:1 from BruxAI/index.html's :root + shared component styles, so this page looks
+   identical to the app's own Patch tab. Only the connection layer underneath differs: this page
+   talks to the ESP32 bridge over WebSocket instead of Web Bluetooth. */
+:root {
+  --bg:       #ffffff;
+  --bg2:      #fdf8f8;
+  --bg3:      #f9eeef;
+  --bg4:      #f2e1e3;
+  --border:   rgba(192,30,46,0.07);
+  --border2:  rgba(192,30,46,0.14);
+  --text:     #1a0a0c;
+  --text2:    #6a4046;
+  --text3:    #a08688;
+  --accent:   #C01E2E;
+  --accent2:  #8B0E1C;
+  --accentlt: #fff0f2;
+  --hot:      #C01E2E;
+  --hotlt:    #fff0f2;
+  --hotbd:    #f4aeb6;
+  --green:    #059669;
+  --greenlt:  #ecfdf5;
+  --greenbd:  #a7f3d0;
+  --red:      #dc2626;
+  --redlt:    #fef2f2;
+  --redbd:    #fca5a5;
+  --amber:    #d97706;
+  --amberlt:  #fffbeb;
+  --amberbd:  #fcd34d;
+  --mono: 'DM Mono', monospace;
+  --sans: 'Syne', sans-serif;
+  --r:  10px;
+  --r2: 18px;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  width: 100%; height: 100%;
+  background: var(--bg2);
+  color: var(--text);
+  font-family: var(--mono);
+  overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+}
+#app { width: 100%; height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+#topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px 10px;
+  padding-top: max(14px, env(safe-area-inset-top));
+  background: var(--bg);
+  border-bottom: 0.5px solid var(--border);
+  flex-shrink: 0;
+}
+.app-title { font-family: var(--sans); font-size: 18px; font-weight: 800; letter-spacing: -0.02em; color: var(--text); }
+.app-sub   { font-family: var(--mono); font-size: 9px; color: var(--text3); letter-spacing: 0.08em; text-transform: uppercase; }
+.scroll { flex: 1; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; }
+.pad { padding: 16px 16px 32px; }
+.label  { font-family: var(--mono); font-size: 9px; color: var(--text3); letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 7px; }
+.pill { display: inline-flex; align-items: center; gap: 4px; font-family: var(--mono); font-size: 9px; letter-spacing: 0.07em; padding: 4px 9px; border-radius: 20px; text-transform: uppercase; }
+.pill-green  { background: var(--greenlt); color: var(--green);  border: 1px solid var(--greenbd); }
+.pill-amber  { background: var(--amberlt); color: var(--amber);  border: 1px solid var(--amberbd); }
+.pill-red    { background: var(--redlt);   color: var(--red);    border: 1px solid var(--redbd); }
+.pill-purple { background: var(--accentlt);color: var(--accent2);border: 1px solid var(--hotbd); }
+.pulse { width: 5px; height: 5px; border-radius: 50%; background: currentColor; animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.25;transform:scale(0.7)} }
+.card { background: var(--bg); border: 0.5px solid var(--border); border-radius: var(--r2); padding: 16px; margin-bottom: 12px; }
+.card-sm { border-radius: var(--r); padding: 12px; }
+.patch-canvas { width: 100%; height: 64px; display: block; border-radius: var(--r); background: var(--bg2); border: 0.5px solid var(--border); }
+.patch-report-overlay { position: fixed; inset: 0; z-index: 1500; background: rgba(10,4,5,0.55); display: none; align-items: center; justify-content: center; padding: 20px; }
+.patch-report-overlay.show { display: flex; }
+.patch-report-card { background: var(--bg); border-radius: var(--r2); border: 0.5px solid var(--border2); padding: 22px 18px; width: 100%; max-width: 380px; max-height: 82vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.patch-report-close { float: right; background: none; border: none; font-family: var(--mono); font-size: 18px; color: var(--text3); cursor: pointer; line-height: 1; padding: 0 0 0 10px; }
+.patch-event-row { padding: 10px 2px; border-bottom: 0.5px solid var(--border); }
+.patch-event-row:last-child { border-bottom: none; }
+.patch-session-row { display: flex; justify-content: space-between; align-items: center; padding: 11px 2px; border-bottom: 0.5px solid var(--border); cursor: pointer; }
+.patch-session-row:last-child { border-bottom: none; }
+.stats-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 8px; }
+.stat-card { background: var(--bg2); border-radius: var(--r); padding: 10px 6px; text-align: center; border: 0.5px solid var(--border); }
+.stat-val  { font-family: var(--sans); font-size: 18px; font-weight: 700; color: var(--text); }
+.stat-lbl  { font-family: var(--mono); font-size: 8px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.08em; margin-top: 2px; }
+.empty { text-align: center; padding: 40px 20px; }
+.empty-icon { font-size: 32px; margin-bottom: 10px; opacity: 0.3; }
+.empty-text { font-family: var(--mono); font-size: 11px; color: var(--text3); line-height: 1.8; }
+.tip-box { background: var(--accentlt); border: 0.5px solid #c4b5fd; border-radius: var(--r); padding: 11px 13px; margin-bottom: 10px; font-family: var(--mono); font-size: 10px; color: var(--text2); line-height: 1.65; }
+.tip-box b { color: var(--accent2); font-weight: 500; }
+#toast {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(12px);
+  background: var(--text); border-radius: 20px; padding: 10px 20px;
+  font-family: var(--mono); font-size: 11px; color: var(--bg); letter-spacing: 0.04em;
+  opacity: 0; transition: all 0.25s; pointer-events: none; z-index: 999; white-space: nowrap;
+}
+#toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="topbar">
+    <div>
+      <div class="app-title" style="color:var(--accent)">BSI-EBI Patch</div>
+      <div class="app-sub">Wearable sensor · via BroxMon Bridge</div>
+    </div>
+    <div id="patch-status" class="pill pill-red"><span class="pulse"></span>bridge unreachable</div>
+  </div>
+  <div class="scroll"><div class="pad">
+
+    <div class="tip-box">
+      This page is served directly by the BroxMon Bridge (an ESP32 sitting next to the patch) —
+      it talks Bluetooth to the patch and hands the data to this page over your Wi-Fi. Works the
+      same on iPhone, Android, or a computer, since it's all plain Wi-Fi from here on.
+    </div>
+
+    <div class="card">
+      <button id="patch-connect-btn" onclick="patchRescan()" style="width:100%;font-family:var(--mono);font-size:12px;padding:12px;border-radius:var(--r);background:var(--accent);color:#fff;border:none;cursor:pointer;letter-spacing:0.06em;text-transform:uppercase">Rescan for patch</button>
+      <div class="stats-grid" style="margin-top:10px">
+        <div class="stat-card"><div class="stat-val" id="patch-stat-packets" style="color:var(--accent)">0</div><div class="stat-lbl">packets</div></div>
+        <div class="stat-card"><div class="stat-val" id="patch-stat-device" style="color:var(--text2);font-size:11px">—</div><div class="stat-lbl">device</div></div>
+        <div class="stat-card"><div class="stat-val" id="patch-stat-rec" style="color:var(--hot)">off</div><div class="stat-lbl">recording</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="label">Microphone · 8 kHz</div>
+      <canvas id="patch-canvas-mic" class="patch-canvas"></canvas>
+      <div class="stat-lbl" style="text-align:right;margin-top:2px" id="patch-count-mic">0 samples</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Accelerometer · 100 Hz</div>
+      <canvas id="patch-canvas-acc" class="patch-canvas"></canvas>
+      <div class="stat-lbl" style="text-align:right;margin-top:2px" id="patch-count-acc">0 samples</div>
+    </div>
+
+    <div class="card">
+      <div class="label">FSM pressure · 100 Hz</div>
+      <canvas id="patch-canvas-fsm" class="patch-canvas"></canvas>
+      <div class="stat-lbl" style="text-align:right;margin-top:2px" id="patch-count-fsm">0 samples</div>
+    </div>
+
+    <div class="card card-sm" style="background:var(--bg2)">
+      <div class="label" style="margin-bottom:6px">Session capture</div>
+      <button id="patch-record-btn" onclick="patchToggleRecording()" disabled style="width:100%;font-family:var(--mono);font-size:10px;padding:8px 14px;border-radius:8px;background:transparent;border:0.5px solid var(--border2);color:var(--text3);cursor:pointer;letter-spacing:0.06em;text-transform:uppercase">Start recording</button>
+      <div id="patch-download-row" style="display:none;gap:8px;margin-top:8px"></div>
+    </div>
+
+    <div class="label" style="margin-top:4px">Past sessions</div>
+    <div id="patch-sessions-list">
+      <div class="empty"><div class="empty-icon">◎</div><div class="empty-text">No patch sessions yet.</div></div>
+    </div>
+
+  </div></div>
+</div>
+<div id="toast"></div>
+
+<div id="patch-report-overlay" class="patch-report-overlay">
+  <div class="patch-report-card">
+    <button class="patch-report-close" onclick="patchCloseReport()">×</button>
+    <div class="app-title" style="color:var(--accent)">Session report</div>
+    <div class="app-sub" id="patch-report-when">—</div>
+    <div class="stats-grid" style="margin-top:12px;margin-bottom:4px">
+      <div class="stat-card"><div class="stat-val" id="patch-report-count" style="color:var(--hot)">0</div><div class="stat-lbl">events</div></div>
+      <div class="stat-card"><div class="stat-val" id="patch-report-dur" style="color:var(--text2)">—</div><div class="stat-lbl">session length</div></div>
+    </div>
+    <div class="label" style="margin-top:10px">Detected events</div>
+    <div id="patch-report-events"></div>
+    <div class="label" style="margin-top:12px">Download raw data</div>
+    <div id="patch-report-downloads" style="display:flex;gap:8px"></div>
+  </div>
+</div>
+
+<script>
+function toast(msg, ms){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'), ms || 3000);}
+
+// ═══ BroxMon Bridge client ═══
+// Same buffers/charts/detection/CSV/session logic as BruxAI/index.html's patch* functions
+// (ported as-is — that part was already working). What's different is the connection layer:
+// instead of Web Bluetooth talking to the patch directly, this page opens a WebSocket to the
+// ESP32 bridge sitting on the local network, and the bridge is the one that speaks Bluetooth to
+// the patch and forwards already-decoded samples over Wi-Fi.
+const PATCH_BUFFER_MAX = 300;
+
+const patchState = {
+  ws: null,
+  wsConnected: false,
+  patchConnected: false,
+  recording: false,
+  packetCount: 0,
+  buffers: { mic: [], acc: [], fsm: [] },
+  csvRows:  { mic: [], acc: [], fsm: [] },
+  buckets:  { mic: {}, acc: {}, fsm: {} },
+  sessionStart: null,
+  wsReconnectTimer: null,
+};
+
+function patchPushSamples(channel, values) {
+  const buf = patchState.buffers[channel];
+  for (const v of values) {
+    buf.push(v);
+    if (buf.length > PATCH_BUFFER_MAX) buf.shift();
+  }
+  if (patchState.recording) {
+    for (const v of values) patchState.csvRows[channel].push(v);
+    patchUpdateBucket(channel, Date.now(), values);
+  }
+}
+
+function patchUpdateBucket(channel, ts, values) {
+  const key = Math.floor(ts / 1000);
+  const buckets = patchState.buckets[channel];
+  let b = buckets[key];
+  if (!b) b = buckets[key] = { n: 0, sum: 0, sumSq: 0 };
+  for (const v of values) {
+    b.n++; b.sum += v; b.sumSq += v * v;
+  }
+}
+
+function patchOnSample(channel, values) {
+  patchPushSamples(channel, values);
+  patchState.packetCount++;
+  patchDrawChart(channel);
+  const countEl = document.getElementById('patch-count-' + channel);
+  if (countEl) countEl.textContent = patchState.buffers[channel].length + ' samples';
+  const pktEl = document.getElementById('patch-stat-packets');
+  if (pktEl) pktEl.textContent = patchState.packetCount;
+}
+
+function patchDrawChart(channel) {
+  const c = document.getElementById('patch-canvas-' + channel);
+  if (!c) return;
+  const ctx = c.getContext('2d');
+  const W = c.offsetWidth, H = 64;
+  c.width = W * (devicePixelRatio || 1); c.height = H * (devicePixelRatio || 1);
+  ctx.scale(devicePixelRatio || 1, devicePixelRatio || 1);
+  ctx.clearRect(0, 0, W, H);
+  const samples = patchState.buffers[channel];
+  if (!samples.length) return;
+  ctx.strokeStyle = '#a5b4fc'; ctx.lineWidth = 1.5; ctx.beginPath();
+  const step = W / samples.length;
+  samples.forEach((v, i) => {
+    const y = H - (v / 65535) * H;
+    const x = i * step;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
+
+function patchSetStatus() {
+  const pill = document.getElementById('patch-status');
+  const recBtn = document.getElementById('patch-record-btn');
+  if (!pill) return;
+  let cls, label;
+  if (!patchState.wsConnected) { cls = 'pill pill-red'; label = 'bridge unreachable'; }
+  else if (!patchState.patchConnected) { cls = 'pill pill-amber'; label = 'bridge up · patch searching'; }
+  else { cls = 'pill pill-green'; label = 'connected'; }
+  pill.className = cls;
+  pill.innerHTML = '<span class="pulse"></span>' + label;
+  if (recBtn) recBtn.disabled = !patchState.patchConnected;
+}
+
+function patchRescan() {
+  if (patchState.ws && patchState.ws.readyState === WebSocket.OPEN) {
+    patchState.ws.send('reconnect');
+    toast('Asking the bridge to rescan…');
+  } else {
+    toast('Bridge unreachable — check the ESP32 is powered and you\'re on its Wi-Fi.');
+    patchConnectWs();
+  }
+}
+
+function patchConnectWs() {
+  clearTimeout(patchState.wsReconnectTimer);
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = proto + '//' + location.host + '/ws';
+  let socket;
+  try { socket = new WebSocket(url); } catch (e) { patchScheduleWsReconnect(); return; }
+  patchState.ws = socket;
+
+  socket.onopen = () => {
+    patchState.wsConnected = true;
+    patchSetStatus();
+  };
+  socket.onclose = () => {
+    patchState.wsConnected = false;
+    patchState.patchConnected = false;
+    patchSetStatus();
+    patchScheduleWsReconnect();
+  };
+  socket.onerror = () => { try { socket.close(); } catch (e) {} };
+  socket.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (msg.type === 'status') {
+      patchState.patchConnected = !!msg.patchConnected;
+      const deviceEl = document.getElementById('patch-stat-device');
+      if (deviceEl) deviceEl.textContent = patchState.patchConnected ? (msg.deviceName || 'BroxMon01') : '—';
+      patchSetStatus();
+    } else if (msg.type === 'sample') {
+      patchOnSample(msg.channel, msg.values || []);
+    }
+  };
+}
+
+function patchScheduleWsReconnect() {
+  clearTimeout(patchState.wsReconnectTimer);
+  patchState.wsReconnectTimer = setTimeout(patchConnectWs, 2000);
+}
+
+function patchToggleRecording() {
+  patchState.recording = !patchState.recording;
+  const btn = document.getElementById('patch-record-btn');
+  const recStat = document.getElementById('patch-stat-rec');
+  if (patchState.recording) {
+    patchState.csvRows = { mic: [], acc: [], fsm: [] };
+    patchState.buckets = { mic: {}, acc: {}, fsm: {} };
+    patchState.sessionStart = Date.now();
+    if (btn) btn.textContent = 'Stop & download CSV';
+    if (recStat) recStat.textContent = 'on';
+    const row = document.getElementById('patch-download-row');
+    if (row) row.style.display = 'none';
+  } else {
+    if (btn) btn.textContent = 'Start recording';
+    if (recStat) recStat.textContent = 'off';
+    patchOfferDownloads();
+    patchFinishSession();
+  }
+}
+
+function patchBuildCsvButtons(container, rowsByChannel) {
+  if (!container) return;
+  container.innerHTML = '';
+  container.style.display = 'flex';
+  const labels = { mic: 'Mic', acc: 'IMU', fsm: 'FSM' };
+  for (const channel of ['mic', 'acc', 'fsm']) {
+    const btn = document.createElement('button');
+    btn.textContent = labels[channel] + ' CSV';
+    btn.style.cssText = 'flex:1;font-family:var(--mono);font-size:10px;padding:8px 4px;border-radius:8px;background:transparent;border:0.5px solid var(--hotbd);color:var(--accent2);cursor:pointer;letter-spacing:0.04em;text-transform:uppercase';
+    btn.onclick = () => patchDownloadCsv(channel, rowsByChannel ? rowsByChannel[channel] : undefined);
+    container.appendChild(btn);
+  }
+}
+
+function patchOfferDownloads() {
+  patchBuildCsvButtons(document.getElementById('patch-download-row'));
+}
+
+function patchDownloadCsv(channel, rows) {
+  rows = rows || patchState.csvRows[channel];
+  if (!rows || !rows.length) { toast('No ' + channel + ' samples captured.'); return; }
+  const csv = rows.join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${channel}_patch_${ts}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// ── Event detection (post-session) — identical thresholds/logic to index.html's patch* code ──
+const PATCH_DETECT = {
+  mic: { threshMult: 1.5, threshAdd: 4096 * 0.02,  onsetSec: 2, offsetSec: 2, minDurSec: 1, maxDurSec: 20 },
+  acc: { threshMult: 1.4, threshAdd: 35000 * 0.02, onsetSec: 2, offsetSec: 2, minDurSec: 1, maxDurSec: 20 },
+  fsm: { threshMult: 1.4, threshAdd: 3000 * 0.03,  onsetSec: 2, offsetSec: 2, minDurSec: 1, maxDurSec: 20 },
+};
+
+function patchDetectChannelEvents(channel, buckets, cfg) {
+  const keys = Object.keys(buckets).map(Number).sort((a, b) => a - b);
+  const events = [];
+  let baseline = null;
+  let onsetRun = 0, offsetRun = 0, inEvent = false, eventStartSec = null, peak = 0, lastKey = null;
+
+  function closeEvent(endSec) {
+    const durSec = endSec - eventStartSec + 1;
+    if (durSec >= cfg.minDurSec) {
+      events.push({ channel, start: new Date(eventStartSec * 1000), end: new Date(endSec * 1000), peak });
+    }
+    inEvent = false; onsetRun = 0; offsetRun = 0; peak = 0; eventStartSec = null;
+  }
+
+  for (const key of keys) {
+    if (lastKey !== null && key - lastKey > 1 && inEvent) {
+      offsetRun += (key - lastKey - 1);
+      if (offsetRun >= cfg.offsetSec) closeEvent(lastKey);
+    }
+    const b = buckets[key];
+    const mean = b.sum / b.n;
+    const variance = Math.max(0, b.sumSq / b.n - mean * mean);
+    const activity = Math.sqrt(variance);
+    if (baseline === null) {
+      baseline = activity;
+    } else {
+      const alpha = activity < baseline ? 0.25 : 0.05;
+      baseline = baseline * (1 - alpha) + activity * alpha;
+    }
+    const dynThresh = baseline * cfg.threshMult + cfg.threshAdd;
+
+    if (activity > dynThresh) {
+      onsetRun++; offsetRun = 0; peak = Math.max(peak, activity);
+      if (!inEvent && onsetRun >= cfg.onsetSec) { inEvent = true; eventStartSec = key - cfg.onsetSec + 1; }
+      if (inEvent && (key - eventStartSec + 1) >= cfg.maxDurSec) closeEvent(key);
+    } else {
+      onsetRun = 0;
+      if (inEvent) { offsetRun++; if (offsetRun >= cfg.offsetSec) closeEvent(key); }
+    }
+    lastKey = key;
+  }
+  if (inEvent) closeEvent(lastKey);
+  return events;
+}
+
+function patchMergeEvents(perChannelEvents) {
+  const all = perChannelEvents.flat().sort((a, b) => a.start - b.start);
+  const merged = [];
+  for (const ev of all) {
+    const last = merged[merged.length - 1];
+    if (last && ev.start.getTime() - last.end.getTime() <= 2000) {
+      last.end = new Date(Math.max(last.end.getTime(), ev.end.getTime()));
+      if (!last.channels.includes(ev.channel)) last.channels.push(ev.channel);
+      last.peaks[ev.channel] = Math.max(last.peaks[ev.channel] || 0, ev.peak);
+    } else {
+      merged.push({ start: ev.start, end: ev.end, channels: [ev.channel], peaks: { [ev.channel]: ev.peak } });
+    }
+  }
+  merged.forEach(m => { m.confidence = m.channels.length >= 2 ? 'high' : 'low'; });
+  return merged;
+}
+
+function patchRunDetection() {
+  const perChannel = ['mic', 'acc', 'fsm'].map(
+    ch => patchDetectChannelEvents(ch, patchState.buckets[ch], PATCH_DETECT[ch])
+  );
+  return patchMergeEvents(perChannel);
+}
+
+// ── Session persistence — own IndexedDB, own origin (this page's own database, separate from
+// both BruxTrackDB and the BroxMonPatchDB used by index.html's own origin) ──
+let patchDb = null;
+function openPatchDB() {
+  if (patchDb) return Promise.resolve(patchDb);
+  return new Promise((res, rej) => {
+    const req = indexedDB.open('BroxMonPatchDB', 1);
+    req.onupgradeneeded = e => {
+      const d = e.target.result;
+      if (!d.objectStoreNames.contains('sessions')) d.createObjectStore('sessions', { keyPath: 'sessionId' });
+    };
+    req.onsuccess = e => { patchDb = e.target.result; res(patchDb); };
+    req.onerror = () => rej(req.error);
+  });
+}
+function patchDbPut(session) {
+  return openPatchDB().then(d => new Promise((res, rej) => {
+    const tx = d.transaction('sessions', 'readwrite');
+    tx.objectStore('sessions').put(session).onsuccess = () => res();
+    tx.onerror = () => rej(tx.error);
+  }));
+}
+function patchDbGetAll() {
+  return openPatchDB().then(d => new Promise((res, rej) => {
+    const tx = d.transaction('sessions', 'readonly');
+    const req = tx.objectStore('sessions').getAll();
+    req.onsuccess = () => res(req.result);
+    req.onerror = () => rej(req.error);
+  }));
+}
+
+async function patchFinishSession() {
+  const sessionStart = patchState.sessionStart;
+  const sessionEnd = Date.now();
+  if (!sessionStart) return;
+  const events = patchRunDetection();
+  const session = {
+    sessionId: sessionStart,
+    startTime: sessionStart,
+    endTime: sessionEnd,
+    events: events.map(e => ({ start: e.start.getTime(), end: e.end.getTime(), channels: e.channels, confidence: e.confidence })),
+    raw: {
+      mic: patchState.csvRows.mic.slice(),
+      acc: patchState.csvRows.acc.slice(),
+      fsm: patchState.csvRows.fsm.slice(),
+    },
+  };
+  try { await patchDbPut(session); } catch (e) { console.warn('[patch] session save failed', e); }
+  patchState.sessionStart = null;
+  patchShowReport(session);
+  patchRenderSessionHistory();
+}
+
+function patchCloseReport() {
+  document.getElementById('patch-report-overlay')?.classList.remove('show');
+}
+
+function patchShowReport(session) {
+  const overlay = document.getElementById('patch-report-overlay');
+  if (!overlay) return;
+  const whenEl = document.getElementById('patch-report-when');
+  const countEl = document.getElementById('patch-report-count');
+  const durEl = document.getElementById('patch-report-dur');
+  const listEl = document.getElementById('patch-report-events');
+  const downloadsEl = document.getElementById('patch-report-downloads');
+
+  const start = new Date(session.startTime);
+  const durMin = Math.max(1, Math.round((session.endTime - session.startTime) / 60000));
+  if (whenEl) whenEl.textContent = start.toLocaleDateString() + ' · ' + start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (countEl) countEl.textContent = session.events.length;
+  if (durEl) durEl.textContent = durMin + ' min';
+
+  if (listEl) {
+    listEl.innerHTML = '';
+    if (!session.events.length) {
+      listEl.innerHTML = '<div class="empty"><div class="empty-icon">◎</div><div class="empty-text">No events detected this session.</div></div>';
+    } else {
+      session.events.slice().sort((a, b) => a.start - b.start).forEach(ev => {
+        const durSec = Math.max(1, Math.round((ev.end - ev.start) / 1000));
+        const time = new Date(ev.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const badgeColor = ev.confidence === 'high' ? ['var(--greenlt)', 'var(--green)'] : ['var(--amberlt)', 'var(--amber)'];
+        const row = document.createElement('div');
+        row.className = 'patch-event-row';
+        row.innerHTML = `<div class="event-time">${time} · ${durSec}s</div>
+          <div class="event-desc">${ev.channels.join(' + ')} &nbsp;
+            <span class="tag" style="background:${badgeColor[0]};color:${badgeColor[1]}">${ev.confidence} confidence</span>
+          </div>`;
+        listEl.appendChild(row);
+      });
+    }
+  }
+  patchBuildCsvButtons(downloadsEl, session.raw);
+  overlay.classList.add('show');
+}
+
+async function patchRenderSessionHistory() {
+  const listEl = document.getElementById('patch-sessions-list');
+  if (!listEl) return;
+  let sessions = [];
+  try { sessions = await patchDbGetAll(); } catch (e) { console.warn('[patch] history load failed', e); }
+  sessions.sort((a, b) => b.startTime - a.startTime);
+  if (!sessions.length) {
+    listEl.innerHTML = '<div class="empty"><div class="empty-icon">◎</div><div class="empty-text">No patch sessions yet.</div></div>';
+    return;
+  }
+  listEl.innerHTML = '';
+  sessions.forEach(s => {
+    const dt = new Date(s.startTime);
+    const durMin = Math.max(1, Math.round((s.endTime - s.startTime) / 60000));
+    const row = document.createElement('div');
+    row.className = 'patch-session-row';
+    row.innerHTML = `<div><div class="event-time">${dt.toLocaleDateString()} · ${dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+        <div class="stat-lbl">${durMin} min session</div></div>
+      <div class="pill pill-purple">${s.events.length} events</div>`;
+    row.onclick = () => patchShowReport(s);
+    listEl.appendChild(row);
+  });
+}
+
+for (const channel of ['mic', 'acc', 'fsm']) patchDrawChart(channel);
+patchRenderSessionHistory();
+patchSetStatus();
+patchConnectWs();
+</script>
+</body>
+</html>
