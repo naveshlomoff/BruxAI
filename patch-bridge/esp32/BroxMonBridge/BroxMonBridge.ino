@@ -22,20 +22,24 @@
  * it only ever makes outbound HTTPS requests, so it works from anywhere with Wi-Fi + internet,
  * not just the same LAN as the browser.
  *
- * Libraries required (Arduino IDE > Tools > Manage Libraries): NimBLE-Arduino (h2zero) only.
- * WiFi/HTTPClient/WiFiClientSecure are built into the ESP32 Arduino core.
+ * Wi-Fi setup is self-service, not hardcoded: this device moves between locations (home, office
+ * demos, ...), and a password baked into the source would also sit in this public repo's git
+ * history forever. WiFiManager (see setupWiFi()) instead opens its own "BroxMon-Setup" network
+ * with a captive portal the first time it can't reach a known one, and remembers whatever you
+ * pick from then on -- hold the BOOT button for ~2s at power-on to forget it and pick again.
+ *
+ * Libraries required (Arduino IDE > Tools > Manage Libraries): NimBLE-Arduino (h2zero) and
+ * WiFiManager (tzapu). WiFi/HTTPClient/WiFiClientSecure are built into the ESP32 Arduino core.
  */
 
 #include <WiFi.h>
+#include <WiFiManager.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <NimBLEDevice.h>
 #include <ArduinoJson.h>
 
-// ── USER CONFIG: edit before flashing ───────────────────────────────────────────────────────
-const char* WIFI_SSID     = "YOUR_WIFI_NAME";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
-// ─────────────────────────────────────────────────────────────────────────────────────────
+static const int BOOT_BUTTON_PIN = 0; // GPIO0 -- the BOOT button on every common ESP32 devkit
 
 // Same project/key already hardcoded in BruxAI/index.html (SUPABASE_URL/SUPABASE_KEY) -- the
 // publishable key is meant to be public client-side, protected by RLS; using it here matches
@@ -44,7 +48,6 @@ const char* SUPABASE_URL = "https://ukoswihzqpztfypqhdnc.supabase.co";
 const char* SUPABASE_KEY = "sb_publishable_VTSRe2BT1ppguJKRhwQF3A_xr0rUtBt";
 const char* CHANNEL_TOPIC = "patch-live";
 
-static const unsigned long WIFI_RETRY_DELAY_MS = 2000;
 static const unsigned long FLUSH_INTERVAL_MS   = 1000; // batched broadcast rate -- see header note
 static const char*         PATCH_NAME_PREFIX   = "BroxMon";
 
@@ -223,15 +226,23 @@ void flushBuffers() {
   // arrived meanwhile) in the next flush attempt, so a dropped request loses time, not data.
 }
 
+// Tries the last-saved network first (fast, silent if already known); only if that fails does it
+// fall back to opening the "BroxMon-Setup" portal. Safe to call again on a dropped connection --
+// a still-in-range known network reconnects quickly without ever showing the portal again.
 void setupWiFi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.printf("[WiFi] connecting to %s", WIFI_SSID);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(WIFI_RETRY_DELAY_MS);
-    Serial.print(".");
+  WiFiManager wm;
+  pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+  if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
+    Serial.println("[WiFi] BOOT button held at startup -- forgetting saved network");
+    wm.resetSettings();
   }
-  Serial.printf("\n[WiFi] connected, IP = %s\n", WiFi.localIP().toString().c_str());
+  Serial.println("[WiFi] connecting (or opening the 'BroxMon-Setup' portal if no known network is in range)...");
+  if (!wm.autoConnect("BroxMon-Setup")) {
+    Serial.println("[WiFi] setup portal closed without a network chosen -- restarting to try again");
+    delay(2000);
+    ESP.restart();
+  }
+  Serial.printf("[WiFi] connected, IP = %s\n", WiFi.localIP().toString().c_str());
 }
 
 void setup() {
