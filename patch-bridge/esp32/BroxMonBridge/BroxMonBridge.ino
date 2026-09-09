@@ -1,97 +1,91 @@
 /*
- * BroxMon Bridge — BLE-to-WiFi relay for the BroxMon patch.
+ * BroxMon Bridge — BLE-to-Supabase relay for the BroxMon patch.
  *
- * Problem this solves: Web Bluetooth cannot run in any iOS browser (Apple/WebKit restriction),
- * and on this project's Windows laptop the direct browser<->patch BLE connection has proven
- * unstable at the GATT layer even from Windows' own native Bluetooth settings (not a browser or
- * app-code issue - see BruxAI's git history for the debugging trail). This sketch moves the BLE
- * connection onto dedicated hardware: the ESP32 is the only thing that ever speaks Bluetooth to
- * the patch. Every other device (iPhone, Android, laptop, whatever) talks to the ESP32 over plain
- * Wi-Fi/HTTP/WebSocket, which every browser on every platform already fully supports.
+ * v2: relays through Supabase Realtime Broadcast instead of serving its own local web page.
+ *
+ * Why: the first version (local WebSocket + a page served by this device) worked, but only at a
+ * URL separate from the real app (naveshlomoff.github.io/BruxAI) -- and it fundamentally could
+ * only ever work that way. A page served over HTTPS (which GitHub Pages forces) can never open a
+ * plain ws:// connection to a device on the local network -- every browser, Safari included,
+ * blocks that as mixed content, and there is no way to get a real trusted TLS certificate for a
+ * device on a private home network. Routing through Supabase (which BruxAI's own index.html
+ * already loads supabase-js for) sidesteps this entirely: Supabase's realtime endpoint has a
+ * normal, properly-trusted certificate, so the SAME naveshlomoff.github.io/BruxAI/ page can
+ * subscribe to it directly, on any device, without ever touching the local network.
  *
  * Architecture:
- *   BroxMon01 (patch) --BLE (NimBLE central)--> ESP32 --WiFi--> browser at http://broxmon.local/
- *   The browser loads /page.html (served from this device's LittleFS) which opens a WebSocket to
- *   /ws and renders the exact same live charts / CSV export / session detection UI as BruxAI's
- *   own Patch tab (ported as-is from index.html — that part was already working correctly).
+ *   BroxMon01 (patch) --BLE (NimBLE central)--> ESP32 --HTTPS POST (Supabase Realtime Broadcast
+ *   REST API)--> Supabase --wss (already-loaded supabase-js)--> naveshlomoff.github.io/BruxAI/
+ *   Patch tab, from any device, on any network.
  *
- * Libraries required (install via Arduino IDE > Tools > Manage Libraries):
- *   - NimBLE-Arduino (h2zero)              — BLE central role, much lighter than the stock BLEDevice
- *   - ESP Async WebServer (ESP32Async fork) — HTTP + WebSocket server
- *   - Async TCP (ESP32Async fork)           — dependency of the above
- *   - ArduinoJson (Benoit Blanchon)         — building the WebSocket JSON messages
+ * This device never serves anything and never needs to be reachable from the browser at all --
+ * it only ever makes outbound HTTPS requests, so it works from anywhere with Wi-Fi + internet,
+ * not just the same LAN as the browser.
  *
- * Board: any ESP32 dev board (ESP32-WROOM32 etc.). In Arduino IDE, also install the "Arduino
- * LittleFS Upload" tool so the data/page.html file in this sketch folder gets flashed alongside
- * the sketch — see ../../README.md for the full step-by-step.
+ * Libraries required (Arduino IDE > Tools > Manage Libraries): NimBLE-Arduino (h2zero) only.
+ * WiFi/HTTPClient/WiFiClientSecure are built into the ESP32 Arduino core.
  */
 
 #include <WiFi.h>
-#include <ESPmDNS.h>
-#include <LittleFS.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <NimBLEDevice.h>
-#include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 
-// ── USER CONFIG: edit these two lines before flashing ──────────────────────────────────────
+// ── USER CONFIG: edit before flashing ───────────────────────────────────────────────────────
 const char* WIFI_SSID     = "YOUR_WIFI_NAME";
 const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
-// If station Wi-Fi above fails (wrong password, out of range, or left as the placeholder),
-// the bridge still starts its own access point below so it's never unreachable.
-const char* AP_SSID     = "BroxMon-Bridge";
-const char* AP_PASSWORD = "brux12345"; // WPA2 requires 8+ characters
 // ─────────────────────────────────────────────────────────────────────────────────────────
 
-static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
-static const char*         PATCH_NAME_PREFIX        = "BroxMon";
+// Same project/key already hardcoded in BruxAI/index.html (SUPABASE_URL/SUPABASE_KEY) -- the
+// publishable key is meant to be public client-side, protected by RLS; using it here matches
+// the app's existing security posture, not a new exposure.
+const char* SUPABASE_URL = "https://ukoswihzqpztfypqhdnc.supabase.co";
+const char* SUPABASE_KEY = "sb_publishable_VTSRe2BT1ppguJKRhwQF3A_xr0rUtBt";
+const char* CHANNEL_TOPIC = "patch-live";
 
-// Same UUIDs confirmed against BroxMon_Firmware/.../App/custom_stm.c and already proven correct
-// against the real hardware from BruxAI's own (direct Web Bluetooth) connection attempts.
+static const unsigned long WIFI_RETRY_DELAY_MS = 2000;
+static const unsigned long FLUSH_INTERVAL_MS   = 1000; // batched broadcast rate -- see header note
+static const char*         PATCH_NAME_PREFIX   = "BroxMon";
+
+// Confirmed against BroxMon_Firmware/.../App/custom_stm.c.
 static const NimBLEUUID SERVICE_UUID("0000fe40-cc7a-482a-984a-7f2ed5b3e58f");
 static const NimBLEUUID CHAR_ACC_UUID("0000fe41-0000-1000-8000-00805f9b34fb");
 static const NimBLEUUID CHAR_MIC_UUID("0000fe42-0000-1000-8000-00805f9b34fb");
 static const NimBLEUUID CHAR_FSM_UUID("0000fe43-0000-1000-8000-00805f9b34fb");
 
-AsyncWebServer server(80);
-AsyncWebSocket ws("/ws");
+static NimBLEClient*           pClient        = nullptr;
+static NimBLEAdvertisedDevice* targetDevice   = nullptr;
+static volatile bool           doConnect      = false;
+static volatile bool           patchConnected = false;
+static bool                    scanning       = false;
+static String                  patchDeviceName = "";
 
-static NimBLEClient*            pClient      = nullptr;
-static NimBLEAdvertisedDevice*  targetDevice = nullptr;
-static volatile bool            doConnect    = false;
-static volatile bool            patchConnected = false;
-static bool                     scanning     = false;
-static String                   patchDeviceName = "";
+// Buffers accumulate every sample between flushes (not just the most recent ones) so batching
+// only adds latency, never drops data -- cleared after each successful POST.
+static std::vector<uint16_t> bufMic, bufAcc, bufFsm;
+static unsigned long lastFlush = 0;
 
 void startScan();
-void broadcastStatus();
+bool postBroadcast(const char* event, const JsonDocument& payload);
 
-// ── BLE notification handler: decode 182-byte / 91 x uint16-LE packets and forward as JSON ──
+// ── BLE notification handler: decode 182-byte / 91 x uint16-LE packets into the buffers ──
 void notifyCallback(NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
-  const char* channel = nullptr;
-  if (pChar->getUUID().equals(CHAR_ACC_UUID)) channel = "acc";
-  else if (pChar->getUUID().equals(CHAR_MIC_UUID)) channel = "mic";
-  else if (pChar->getUUID().equals(CHAR_FSM_UUID)) channel = "fsm";
-  if (!channel || ws.count() == 0) return;
+  std::vector<uint16_t>* buf = nullptr;
+  if (pChar->getUUID().equals(CHAR_ACC_UUID)) buf = &bufAcc;
+  else if (pChar->getUUID().equals(CHAR_MIC_UUID)) buf = &bufMic;
+  else if (pChar->getUUID().equals(CHAR_FSM_UUID)) buf = &bufFsm;
+  if (!buf) return;
 
   size_t count = length / 2;
-  DynamicJsonDocument doc(4096);
-  doc["type"] = "sample";
-  doc["channel"] = channel;
-  JsonArray arr = doc.createNestedArray("values");
   for (size_t i = 0; i < count; i++) {
     uint16_t v = (uint16_t)pData[i * 2] | ((uint16_t)pData[i * 2 + 1] << 8);
-    arr.add(v);
+    buf->push_back(v);
   }
-  String out;
-  serializeJson(doc, out);
-  ws.textAll(out);
 }
 
-// ── Scan: match on advertised name, same reasoning as the web app fix — the hub's ADV packet
-// carries a different, unrelated 16-bit UUID (0xAA01), never the real 128-bit GATT service UUID,
-// so filtering by service UUID at scan time doesn't work; filtering by name does. ──
-class ScanCallbacks : public NimBLEAdvertisedDeviceCallbacks {
-  void onResult(NimBLEAdvertisedDevice* advertisedDevice) override {
+class ScanCallbacks : public NimBLEScanCallbacks {
+  void onResult(const NimBLEAdvertisedDevice* advertisedDevice) override {
     if (advertisedDevice->haveName() &&
         advertisedDevice->getName().rfind(PATCH_NAME_PREFIX, 0) == 0) {
       Serial.printf("[BLE] found %s\n", advertisedDevice->getName().c_str());
@@ -102,13 +96,16 @@ class ScanCallbacks : public NimBLEAdvertisedDeviceCallbacks {
       doConnect = true;
     }
   }
+  void onScanEnd(const NimBLEScanResults& results, int reason) override {}
 };
 
 class ClientCallbacks : public NimBLEClientCallbacks {
-  void onDisconnect(NimBLEClient* pclient) override {
+  void onDisconnect(NimBLEClient* pclient, int reason) override {
     Serial.println("[BLE] patch disconnected");
     patchConnected = false;
-    broadcastStatus();
+    JsonDocument doc;
+    doc["patchConnected"] = false;
+    postBroadcast("status", doc);
     startScan();
   }
 };
@@ -121,11 +118,11 @@ void startScan() {
   scanning = true;
   Serial.println("[BLE] scanning for BroxMon...");
   NimBLEScan* pScan = NimBLEDevice::getScan();
-  pScan->setAdvertisedDeviceCallbacks(&scanCallbacks, false);
+  pScan->setScanCallbacks(&scanCallbacks, false);
   pScan->setActiveScan(true);
   pScan->setInterval(100);
   pScan->setWindow(99);
-  pScan->start(0, nullptr, false); // scan indefinitely until a match stops it
+  pScan->start(0, false, true); // duration 0 = scan indefinitely until a match stops it
 }
 
 bool connectToPatch() {
@@ -141,10 +138,9 @@ bool connectToPatch() {
     return false;
   }
 
-  // Mirror the fix already confirmed on the web-app side (BruxAI/index.html, patchConnectGatt):
-  // the hub's firmware fires a one-shot L2CAP connection-parameter-update request ~1s after
-  // connecting (BroxMon_Firmware's app_ble.c — "critical for reliable 8kHz audio streaming").
-  // Waiting past that mark before touching services avoids the race.
+  // Hub firmware fires a one-shot L2CAP connection-parameter-update ~1s after connecting
+  // (BroxMon_Firmware's app_ble.c -- "critical for reliable 8kHz audio streaming"). Waiting past
+  // that mark before touching services avoids a service-discovery race confirmed on real hardware.
   delay(2000);
 
   NimBLERemoteService* pService = pClient->getService(SERVICE_UUID);
@@ -173,91 +169,89 @@ bool connectToPatch() {
 
   patchConnected = true;
   Serial.println("[BLE] connected + subscribed");
-  broadcastStatus();
+  JsonDocument doc;
+  doc["patchConnected"] = true;
+  doc["deviceName"] = patchDeviceName;
+  postBroadcast("status", doc);
   return true;
 }
 
-// ── WebSocket: broadcast status to all connected browsers, accept "reconnect" commands ──
-void broadcastStatus() {
-  StaticJsonDocument<192> doc;
-  doc["type"] = "status";
-  doc["patchConnected"] = patchConnected;
-  doc["deviceName"] = patchDeviceName;
-  String out;
-  serializeJson(doc, out);
-  ws.textAll(out);
-}
+// ── Supabase Realtime Broadcast REST API (confirmed against Supabase's own docs) ──
+// POST {url}/realtime/v1/api/broadcast/{topic}/events/{event}, header apikey: <key>, JSON body.
+bool postBroadcast(const char* event, const JsonDocument& payload) {
+  if (WiFi.status() != WL_CONNECTED) return false;
 
-void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client, AwsEventType type,
-               void* arg, uint8_t* data, size_t len) {
-  if (type == WS_EVT_CONNECT) {
-    broadcastStatus();
-  } else if (type == WS_EVT_DATA) {
-    String msg;
-    for (size_t i = 0; i < len; i++) msg += (char)data[i];
-    if (msg == "reconnect") {
-      Serial.println("[WS] rescan requested");
-      if (pClient && pClient->isConnected()) pClient->disconnect();
-      patchConnected = false;
-      startScan();
-    }
+  WiFiClientSecure client;
+  client.setInsecure(); // skip cert pinning: avoids a brittle hardcoded root CA that breaks on
+                         // rotation, and this payload is non-sensitive sensor waveform data --
+                         // same tradeoff many ESP32-to-cloud-API sketches make.
+  HTTPClient http;
+  String url = String(SUPABASE_URL) + "/realtime/v1/api/broadcast/" + CHANNEL_TOPIC + "/events/" + event;
+  if (!http.begin(client, url)) return false;
+  http.addHeader("apikey", SUPABASE_KEY);
+  http.addHeader("Content-Type", "application/json");
+
+  String body;
+  serializeJson(payload, body);
+  int code = http.POST(body);
+  http.end();
+
+  if (code < 200 || code >= 300) {
+    Serial.printf("[Supabase] broadcast '%s' failed, HTTP %d\n", event, code);
+    return false;
   }
+  return true;
 }
 
-// ── Wi-Fi: station with an always-on AP fallback, so the bridge is never unreachable ──
+void flushBuffers() {
+  if (bufMic.empty() && bufAcc.empty() && bufFsm.empty()) return;
+
+  JsonDocument doc;
+  JsonArray mic = doc["mic"].to<JsonArray>();
+  for (uint16_t v : bufMic) mic.add(v);
+  JsonArray acc = doc["acc"].to<JsonArray>();
+  for (uint16_t v : bufAcc) acc.add(v);
+  JsonArray fsm = doc["fsm"].to<JsonArray>();
+  for (uint16_t v : bufFsm) fsm.add(v);
+
+  if (postBroadcast("sample", doc)) {
+    bufMic.clear();
+    bufAcc.clear();
+    bufFsm.clear();
+  }
+  // On failure, buffers are deliberately left intact -- they'll be included (plus whatever
+  // arrived meanwhile) in the next flush attempt, so a dropped request loses time, not data.
+}
+
 void setupWiFi() {
-  WiFi.mode(WIFI_AP_STA);
+  WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.printf("[WiFi] connecting to %s", WIFI_SSID);
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
-    delay(300);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(WIFI_RETRY_DELAY_MS);
     Serial.print(".");
   }
-  Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("[WiFi] connected, IP = %s\n", WiFi.localIP().toString().c_str());
-  } else {
-    Serial.println("[WiFi] station connect failed — check WIFI_SSID/WIFI_PASSWORD at the top of this file");
-  }
-
-  WiFi.softAP(AP_SSID, AP_PASSWORD);
-  Serial.printf("[WiFi] AP '%s' up, IP = %s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
-
-  if (MDNS.begin("broxmon")) {
-    Serial.println("[mDNS] http://broxmon.local/");
-  } else {
-    Serial.println("[mDNS] failed to start — use the IP address printed above instead");
-  }
+  Serial.printf("\n[WiFi] connected, IP = %s\n", WiFi.localIP().toString().c_str());
 }
 
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\n=== BroxMon Bridge starting ===");
-
-  if (!LittleFS.begin(true)) {
-    Serial.println("[FS] LittleFS mount failed — did you run 'ESP32 LittleFS Data Upload' with data/page.html present?");
-  }
+  Serial.println("\n=== BroxMon Bridge (Supabase relay) starting ===");
 
   setupWiFi();
-
   NimBLEDevice::init("");
-
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
-    request->send(LittleFS, "/page.html", "text/html");
-  });
-  ws.onEvent(onWsEvent);
-  server.addHandler(&ws);
-  server.begin();
-
   startScan();
+
+  lastFlush = millis();
   Serial.println("=== Ready ===");
 }
 
 void loop() {
-  ws.cleanupClients();
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[WiFi] connection lost, reconnecting...");
+    setupWiFi();
+  }
 
   if (doConnect) {
     doConnect = false;
@@ -266,6 +260,11 @@ void loop() {
       delay(1000);
       startScan();
     }
+  }
+
+  if (millis() - lastFlush >= FLUSH_INTERVAL_MS) {
+    lastFlush = millis();
+    flushBuffers();
   }
 
   delay(10);

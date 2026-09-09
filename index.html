@@ -624,27 +624,21 @@ document.addEventListener('touchstart', function iosUnlock() {
     <div id="topbar">
       <div>
         <div class="app-title" style="color:var(--accent)">BSI-EBI Patch</div>
-        <div class="app-sub">Wearable sensor · Bluetooth</div>
+        <div class="app-sub">Wearable sensor · via BroxMon Bridge</div>
       </div>
       <div id="patch-status" class="pill pill-red"><span class="pulse"></span>disconnected</div>
     </div>
     <div class="scroll"><div class="pad">
 
-      <div id="patch-unsupported" class="tip-box" style="display:none">
-        <b>Web Bluetooth not available.</b> Open this tab in Chrome or Edge on Android or a desktop computer — Safari and iOS do not support Bluetooth pairing from the browser.
-      </div>
-
       <div class="tip-box">
-        <b>Works on iPhone too, via the BroxMon Bridge:</b> a small ESP32 relay talks Bluetooth to
-        the patch directly and hands the data to any browser over Wi-Fi — no Web Bluetooth needed
-        at all. If one is set up, join its network and open <b>http://broxmon.local/</b> instead
-        of this tab. Setup: <code>patch-bridge/README.md</code> in the repo.
+        A BroxMon Bridge (a small ESP32 next to the patch) talks Bluetooth to it directly and
+        relays the data through Supabase — no Bluetooth needed in this browser, works the same on
+        iPhone, Android, or a computer. Setup: <code>patch-bridge/README.md</code> in the repo.
       </div>
 
       <div class="card">
-        <button id="patch-connect-btn" onclick="patchToggleConnect()" style="width:100%;font-family:var(--mono);font-size:12px;padding:12px;border-radius:var(--r);background:var(--accent);color:#fff;border:none;cursor:pointer;letter-spacing:0.06em;text-transform:uppercase">Connect to patch</button>
-        <div class="stats-grid" style="margin-top:10px">
-          <div class="stat-card"><div class="stat-val" id="patch-stat-packets" style="color:var(--accent)">0</div><div class="stat-lbl">packets</div></div>
+        <div class="stats-grid">
+          <div class="stat-card"><div class="stat-val" id="patch-stat-packets" style="color:var(--accent)">0</div><div class="stat-lbl">samples</div></div>
           <div class="stat-card"><div class="stat-val" id="patch-stat-device" style="color:var(--text2);font-size:11px">—</div><div class="stat-lbl">device</div></div>
           <div class="stat-card"><div class="stat-val" id="patch-stat-rec" style="color:var(--hot)">off</div><div class="stat-lbl">recording</div></div>
         </div>
@@ -2329,38 +2323,25 @@ async function uploadClipToCloud(eventId, sessionId, nightCloudId, retries = 2) 
 }
 
 // ═══ BSI-EBI PATCH (BroxMon BLE hardware) ═══
-// Isolated from the recorder/IndexedDB/Supabase code above: own state object, own DOM ids,
-// own functions (all prefixed patch...). Talks directly to the BroxMon hub (STM32WB5) via
-// Web Bluetooth. Nothing here reads or writes `state`, `db`, or Supabase.
-// UUIDs + 182-byte/91×uint16-LE packet format ported from broxmon_app/lib/ble_constants.dart
-// and broxmon_app/lib/services/ble_service.dart — keep in sync with the hub firmware.
-const PATCH_SERVICE_UUID = '0000fe40-cc7a-482a-984a-7f2ed5b3e58f';
-const PATCH_CHARS = {
-  acc: '0000fe41-0000-1000-8000-00805f9b34fb',
-  mic: '0000fe42-0000-1000-8000-00805f9b34fb',
-  fsm: '0000fe43-0000-1000-8000-00805f9b34fb',
-};
+// Isolated from the recorder/IndexedDB code above: own state object, own DOM ids, own functions
+// (all prefixed patch...). Does NOT talk to the hub directly — a BroxMon Bridge (ESP32) does that
+// over BLE and relays samples through a Supabase Realtime Broadcast channel (patch-live), which
+// this reuses the app's own `supabase` client to subscribe to. This detour exists because a page
+// served over HTTPS (GitHub Pages) can never open a plain ws:// connection to a device on the
+// local network — every browser, Safari included, blocks that as mixed content — so the ESP32
+// can't be talked to directly from here. See patch-bridge/README.md for the hardware side.
+// Nothing here reads or writes `state` or `db` (the recorder's IndexedDB).
 const PATCH_BUFFER_MAX = 300;
 
 const patchState = {
-  device: null,
-  server: null,
-  connState: 'idle',      // idle | connecting | connected | disconnected
+  connState: 'disconnected', // disconnected | connected — mirrors the bridge's last "status" broadcast
   recording: false,
-  packetCount: 0,
+  sampleCount: 0,
   buffers: { mic: [], acc: [], fsm: [] },
   csvRows:  { mic: [], acc: [], fsm: [] },
   buckets:  { mic: {}, acc: {}, fsm: {} },  // epochSecond -> {n,sum,sumSq,min,max}, recording-only, feeds the event detector
   sessionStart: null,     // Date.now() when the current recording started; null when idle
-  reconnectTimer: null,
 };
-
-function patchDecodeUint16LE(dataView) {
-  const count = Math.floor(dataView.byteLength / 2);
-  const out = new Array(count);
-  for (let i = 0; i < count; i++) out[i] = dataView.getUint16(i * 2, true);
-  return out;
-}
 
 function patchPushSamples(channel, values) {
   const buf = patchState.buffers[channel];
@@ -2387,15 +2368,36 @@ function patchUpdateBucket(channel, ts, values) {
   }
 }
 
-function patchOnNotify(channel, event) {
-  const values = patchDecodeUint16LE(event.target.value);
-  patchPushSamples(channel, values);
-  patchState.packetCount++;
-  patchDrawChart(channel);
-  const countEl = document.getElementById('patch-count-' + channel);
-  if (countEl) countEl.textContent = patchState.buffers[channel].length + ' samples';
+// One "sample" broadcast = one flush interval from the bridge (~1s), carrying every sample
+// accumulated since the last flush per channel — not a 1:1 mirror of individual BLE packets.
+function patchOnBroadcastSample(payload) {
+  for (const channel of ['mic', 'acc', 'fsm']) {
+    const values = payload[channel];
+    if (!values || !values.length) continue;
+    patchPushSamples(channel, values);
+    patchState.sampleCount += values.length;
+    patchDrawChart(channel);
+    const countEl = document.getElementById('patch-count-' + channel);
+    if (countEl) countEl.textContent = patchState.buffers[channel].length + ' samples';
+  }
   const pktEl = document.getElementById('patch-stat-packets');
-  if (pktEl) pktEl.textContent = patchState.packetCount;
+  if (pktEl) pktEl.textContent = patchState.sampleCount;
+}
+
+function patchOnBroadcastStatus(payload) {
+  patchSetStatus(payload.patchConnected ? 'connected' : 'disconnected');
+  const deviceNameEl = document.getElementById('patch-stat-device');
+  if (deviceNameEl) deviceNameEl.textContent = payload.patchConnected ? (payload.deviceName || 'BroxMon') : '—';
+}
+
+// Subscribes to the bridge's Supabase Realtime channel. Called once from init() after the shared
+// `supabase` client exists; retries briefly if it isn't ready yet.
+function patchInitRealtime() {
+  if (!supabase) { setTimeout(patchInitRealtime, 500); return; }
+  supabase.channel('patch-live')
+    .on('broadcast', { event: 'sample' }, (msg) => patchOnBroadcastSample(msg.payload))
+    .on('broadcast', { event: 'status' }, (msg) => patchOnBroadcastStatus(msg.payload))
+    .subscribe();
 }
 
 function patchDrawChart(channel) {
@@ -2421,126 +2423,16 @@ function patchDrawChart(channel) {
 function patchSetStatus(connState) {
   patchState.connState = connState;
   const pill = document.getElementById('patch-status');
-  const btn = document.getElementById('patch-connect-btn');
   const recBtn = document.getElementById('patch-record-btn');
   if (!pill) return;
   const map = {
-    idle:         ['pill pill-red',   'disconnected'],
-    connecting:   ['pill pill-amber', 'connecting…'],
-    connected:    ['pill pill-green', 'connected'],
     disconnected: ['pill pill-red',   'disconnected'],
+    connected:    ['pill pill-green', 'connected'],
   };
-  const [cls, label] = map[connState] || map.idle;
+  const [cls, label] = map[connState] || map.disconnected;
   pill.className = cls;
   pill.innerHTML = '<span class="pulse"></span>' + label;
-  if (btn) btn.textContent = connState === 'connected' ? 'Disconnect' : (connState === 'connecting' ? 'Connecting…' : 'Connect to patch');
   if (recBtn) recBtn.disabled = connState !== 'connected';
-}
-
-async function patchToggleConnect() {
-  if (patchState.connState === 'connected' || patchState.connState === 'connecting') {
-    await patchDisconnect();
-  } else {
-    await patchConnect();
-  }
-}
-
-// The hub's firmware (BroxMon_Firmware/.../App/app_ble.c) arms a one-shot timer on every BLE
-// connect: exactly 1000ms later it fires an L2CAP connection-parameter-update request (down to a
-// 7.5-10ms interval, "critical for reliable 8kHz audio streaming" per its own comment). If
-// Chrome/Edge is still mid service-discovery when that request lands, Windows' Bluetooth stack
-// tears the GATT session down — surfaced here as "GATT Server is disconnected. Cannot retrieve
-// services." Confirmed against the firmware source, not a guess; not a sign the UUIDs or the
-// device are wrong. Waiting the discovery out past the 1s mark avoids the collision — and since
-// each retry's device.gatt.connect() re-arms the hub's timer, the same wait applies every time.
-async function patchConnectGatt(device, attempts = 4) {
-  let lastErr;
-  for (let i = 0; i < attempts; i++) {
-    try {
-      const server = await device.gatt.connect();
-      await new Promise(r => setTimeout(r, 2000)); // clear the hub's 1s post-connect L2CAP renegotiation, with margin
-      const service = await server.getPrimaryService(PATCH_SERVICE_UUID);
-      return { server, service };
-    } catch (e) {
-      lastErr = e;
-      try { device.gatt.disconnect(); } catch (_) {}
-      await new Promise(r => setTimeout(r, 500));
-    }
-  }
-  throw lastErr;
-}
-
-async function patchSubscribeAll(service) {
-  for (const [channel, uuid] of Object.entries(PATCH_CHARS)) {
-    const char = await service.getCharacteristic(uuid);
-    await char.startNotifications();
-    char.addEventListener('characteristicvaluechanged', (e) => patchOnNotify(channel, e));
-  }
-}
-
-async function patchConnect() {
-  if (!navigator.bluetooth) { toast('Web Bluetooth not available in this browser.'); return; }
-  try {
-    patchSetStatus('connecting');
-    // Filter by name, not the 128-bit custom service UUID: confirmed against the firmware's own
-    // advertising packet (BroxMon_Firmware/.../App/app_ble.c, a_AdvData[]) that the hub advertises
-    // a different, unrelated 16-bit UUID (0xAA01 — a CubeMX template leftover) — the real GATT
-    // service (0000fe40-...) is only visible after connecting, never in the ADV payload, so a
-    // services filter here can never match. The same ADV packet does carry
-    // AD_TYPE_COMPLETE_LOCAL_NAME "BroxMon01", which is what's filtered on below — this also
-    // keeps the chooser from listing every unrelated BLE device in range.
-    // optionalServices is still required so GATT can reach the service once connected.
-    const device = await navigator.bluetooth.requestDevice({
-      filters: [{ namePrefix: 'BroxMon' }],
-      optionalServices: [PATCH_SERVICE_UUID],
-    });
-    patchState.device = device;
-    device.addEventListener('gattserverdisconnected', patchHandleDisconnect);
-    const { server, service } = await patchConnectGatt(device);
-    patchState.server = server;
-    await patchSubscribeAll(service);
-    const deviceNameEl = document.getElementById('patch-stat-device');
-    if (deviceNameEl) deviceNameEl.textContent = device.name || 'BroxMon';
-    patchSetStatus('connected');
-  } catch (e) {
-    console.warn('[patch] connect failed', e);
-    toast('Patch connection failed: ' + (e.message || e));
-    patchSetStatus('idle');
-  }
-}
-
-function patchHandleDisconnect() {
-  patchSetStatus('disconnected');
-  toast('Patch disconnected — retrying in 3s');
-  clearTimeout(patchState.reconnectTimer);
-  patchState.reconnectTimer = setTimeout(() => {
-    if (patchState.device && patchState.connState === 'disconnected') patchReconnect();
-  }, 3000);
-}
-
-async function patchReconnect() {
-  try {
-    patchSetStatus('connecting');
-    const { server, service } = await patchConnectGatt(patchState.device);
-    patchState.server = server;
-    await patchSubscribeAll(service);
-    patchSetStatus('connected');
-  } catch (e) {
-    console.warn('[patch] reconnect failed', e);
-    patchState.reconnectTimer = setTimeout(() => patchReconnect(), 3000);
-  }
-}
-
-async function patchDisconnect() {
-  clearTimeout(patchState.reconnectTimer);
-  patchState.reconnectTimer = null;
-  const device = patchState.device;
-  patchState.device = null; // prevent auto-reconnect from firing
-  try { device?.removeEventListener('gattserverdisconnected', patchHandleDisconnect); } catch(e) {}
-  try { device?.gatt?.disconnect(); } catch(e) {}
-  patchState.server = null;
-  if (patchState.recording) patchToggleRecording();
-  patchSetStatus('idle');
 }
 
 function patchToggleRecording() {
@@ -2814,15 +2706,6 @@ async function patchRenderSessionHistory() {
 }
 
 function renderPatchScreen() {
-  const unsupported = document.getElementById('patch-unsupported');
-  const connectBtn = document.getElementById('patch-connect-btn');
-  if (!navigator.bluetooth) {
-    if (unsupported) unsupported.style.display = 'block';
-    if (connectBtn) connectBtn.disabled = true;
-  } else {
-    if (unsupported) unsupported.style.display = 'none';
-    if (connectBtn) connectBtn.disabled = false;
-  }
   patchSetStatus(patchState.connState);
   for (const channel of ['mic', 'acc', 'fsm']) patchDrawChart(channel);
   patchRenderSessionHistory();
@@ -2831,6 +2714,7 @@ function renderPatchScreen() {
 async function init(){
   await openDB(); loadSettings();
   initSupabase();
+  patchInitRealtime();
   // Check for an interrupted recording session and recover its draft
   try {
     const orphan = JSON.parse(localStorage.getItem('bt-active-recording') || 'null');
