@@ -2458,7 +2458,12 @@ function patchApplyOffline() {
 
 function patchOnBroadcastSample(payload) {
   patchApplyBridgeState('connected');
-  if (typeof payload.micRms === 'number') patchUpdateMicLevel(payload.micRms);
+  if (typeof payload.micRms === 'number') {
+    patchUpdateMicLevel(payload.micRms);
+    if (patchState.recording && patchState.micLevelRows) {
+      patchState.micLevelRows.push([Date.now() - patchState.sessionStart, payload.micRms]);
+    }
+  }
   for (const channel of ['mic', 'acc', 'fsm']) {
     const values = payload[channel];
     if (!values || !values.length) continue;
@@ -2487,6 +2492,7 @@ function patchInitRealtime() {
     .on('broadcast', { event: 'sample' }, (msg) => patchOnBroadcastSample(msg.payload))
     .on('broadcast', { event: 'status' }, (msg) => patchOnBroadcastStatus(msg.payload))
     .subscribe();
+  patchSyncPendingSessions(); // upload any recordings that couldn't reach the cloud last time
 }
 
 function patchDrawChart(channel) {
@@ -2585,6 +2591,7 @@ function patchToggleRecording() {
   if (patchState.recording) {
     patchState.csvRows = { mic: [], acc: [], fsm: [] };
     patchState.buckets = { mic: {}, acc: {}, fsm: {} };
+    patchState.micLevelRows = [];
     patchState.sessionStart = Date.now();
     if (btn) btn.textContent = 'Stop & download CSV';
     if (recStat) recStat.textContent = 'on';
@@ -2775,11 +2782,105 @@ async function patchFinishSession() {
       acc: patchState.csvRows.acc.slice(),
       fsm: patchState.csvRows.fsm.slice(),
     },
+    micLevel: (patchState.micLevelRows || []).slice(),
+    deviceName: patchDeviceNameForSession(),
   };
   try { await patchDbPut(session); } catch (e) { console.warn('[patch] session save failed', e); }
   patchState.sessionStart = null;
   patchShowReport(session);
   patchRenderSessionHistory();
+  patchSaveSessionToCloud(session); // after the local save, so a failed upload never loses the session
+}
+
+function patchDeviceNameForSession() {
+  const name = document.getElementById('patch-stat-device')?.textContent || '';
+  return name && name !== '—' ? name : null;
+}
+
+// ── PATCH CLOUD SAVE ───────────────────────────────────────────────────────────
+// One patch_sessions row per recording (same ownership model as syncNightToCloud's nights/events),
+// plus the raw samples as a gzipped JSON file in the private "patch-raw" bucket — a long session is
+// megabytes of samples, too big for a table row. Schema: patch-bridge/supabase_patch_sessions.sql.
+// The session is always on the device first; one that fails to upload keeps no cloudSyncedAt and
+// is retried by patchSyncPendingSessions() the next time the app opens.
+async function patchUploadSession(session) {
+  const userId = state.user.id;
+  const raw = session.raw || { mic: [], acc: [], fsm: [] };
+  const events = session.events || [];
+  const file = JSON.stringify({
+    format: 'broxmon-patch-session-v1',
+    sessionId: session.sessionId,
+    startTime: session.startTime,
+    endTime: session.endTime,
+    deviceName: session.deviceName || null,
+    micDecimation: 4, // mic arrives as every 4th sample of the patch's 8 kHz; acc/fsm are 100 Hz
+    mic: raw.mic,
+    acc: raw.acc,
+    fsm: raw.fsm,
+    micLevel: session.micLevel || [], // [[ms since session start, full-rate rms], ...]
+    events,
+  });
+
+  let blob = new Blob([file], { type: 'application/json' });
+  let path = `${userId}/${session.sessionId}.json`;
+  let contentType = 'application/json';
+  if (typeof CompressionStream === 'function') {
+    blob = await new Response(blob.stream().pipeThrough(new CompressionStream('gzip'))).blob();
+    path += '.gz';
+    contentType = 'application/gzip';
+  }
+  const { error: uploadErr } = await supabase.storage.from('patch-raw')
+    .upload(path, blob, { contentType, upsert: true });
+  if (uploadErr) throw uploadErr;
+
+  const { error: rowErr } = await supabase.from('patch_sessions').upsert({
+    user_id: userId,
+    session_id: session.sessionId,
+    started_at: new Date(session.startTime).toISOString(),
+    ended_at: new Date(session.endTime).toISOString(),
+    duration_sec: Math.round((session.endTime - session.startTime) / 1000),
+    device_name: session.deviceName || null,
+    event_count: events.length,
+    events,
+    mic_level: session.micLevel || [],
+    sample_counts: { mic: raw.mic.length, acc: raw.acc.length, fsm: raw.fsm.length },
+    raw_path: path,
+  }, { onConflict: 'user_id,session_id' });
+  if (rowErr) throw rowErr;
+  return path;
+}
+
+async function patchSaveSessionToCloud(session, quiet) {
+  if (!supabase || !state.user) {
+    if (!quiet) toast('Patch session saved on this device — cloud upload will retry later', 4000);
+    return;
+  }
+  try {
+    session.cloudPath = await patchUploadSession(session);
+    session.cloudSyncedAt = Date.now();
+    await patchDbPut(session);
+    if (!quiet) toast('Patch session saved to cloud');
+  } catch (e) {
+    console.warn('[patch] cloud save failed', e);
+    if (!quiet) toast('Patch session saved on this device only — cloud: ' + (e?.message || e), 5000);
+  }
+}
+
+let patchPendingSyncRunning = false;
+async function patchSyncPendingSessions() {
+  if (patchPendingSyncRunning) return;
+  patchPendingSyncRunning = true;
+  try {
+    // Auth resumes asynchronously in initSupabase(); wait for it instead of racing it.
+    for (let i = 0; i < 30 && !(supabase && state.user); i++) await new Promise(r => setTimeout(r, 500));
+    if (!state.user) return;
+    const sessions = await patchDbGetAll().catch(() => []);
+    for (const s of sessions) {
+      if (!s.cloudSyncedAt) await patchSaveSessionToCloud(s, true);
+    }
+  } finally {
+    patchPendingSyncRunning = false;
+  }
 }
 
 function patchCloseReport() {

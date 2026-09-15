@@ -65,6 +65,19 @@ patch**, וה-ESP32 מתחבר. **Disconnect patch** מנתק - ולפני הנ�
 - **connecting** - מחפש ומתחבר למדבקה (כמה שניות).
 - **connected** - הנתונים זורמים לגרפים. **Disconnect patch** מנתק.
 
+## שמירה בענן (Supabase)
+
+הנתונים החיים לא נשמרים בשום מקום. **הקלטה** (Start recording ← Stop) נשמרת במכשיר, ואם הוגדר
+הענן - גם ב-Supabase:
+- שורה בטבלה `patch_sessions`: זמנים, מכשיר, אירועים שזוהו, סדרת עוצמת המיקרופון, מספר דגימות.
+- הדגימות הגולמיות (mic/acc/fsm) כקובץ JSON דחוס (gzip) בדלי הפרטי `patch-raw`,
+  בנתיב `{user_id}/{session_id}.json.gz`.
+
+**הגדרה חד-פעמית:** Supabase Dashboard → SQL Editor → הדבק את התוכן של
+`patch-bridge/supabase_patch_sessions.sql` → Run. כל משתמש רואה רק את ההקלטות שלו (כמו לילות
+ואירועים). הקלטה שלא הצליחה לעלות (אין אינטרנט, הענן לא הוגדר) נשמרת במכשיר ועולה אוטומטית
+בפעם הבאה שהאפליקציה נפתחת.
+
 ## פתרון בעיות
 
 - **נשאר "bridge offline"** - בדוק ב-Serial Monitor שה-ESP32 מחובר ל-WiFi ושמופיע
