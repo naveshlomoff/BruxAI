@@ -2496,15 +2496,29 @@ function patchDrawChart(channel) {
   ctx.clearRect(0, 0, W, H);
   const samples = patchState.buffers[channel];
   if (!samples.length) return;
+  // Auto-scale around the visible window. A fixed 0-65535 scale drew every channel as a flat line:
+  // the mic is a 12-bit ADC idling near ~2050, so real sound moves it by tens to hundreds of counts.
+  // The minimum span keeps idle noise small instead of stretching it to full height.
+  let lo = Infinity, hi = -Infinity;
+  for (const v of samples) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  const span = Math.max(hi - lo, PATCH_CHART_MIN_SPAN[channel] || 1);
+  const mid = (hi + lo) / 2;
   ctx.strokeStyle = '#a5b4fc'; ctx.lineWidth = 1.5; ctx.beginPath();
   const step = W / samples.length;
   samples.forEach((v, i) => {
-    const y = H - (v / 65535) * H;
+    const y = H / 2 - ((v - mid) / span) * (H - 8);
     const x = i * step;
     i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
   });
   ctx.stroke();
+  ctx.fillStyle = '#8b8fa8'; ctx.font = '9px ui-monospace, monospace';
+  ctx.fillText('p-p ' + (hi - lo), 4, 10);
 }
+
+// Smallest vertical range each chart shows, in raw sensor units (mic: 12-bit ADC counts;
+// acc: magnitude, ~16000 at rest = 1 g; fsm: 12-bit ADC counts).
+// Mic measured on real hardware: idle p-p ~50-80, talking nearby ~150-200, a clap/tap 400-850.
+const PATCH_CHART_MIN_SPAN = { mic: 200, acc: 2000, fsm: 200 };
 
 function patchSetStatus(connState) {
   patchState.connState = connState;
