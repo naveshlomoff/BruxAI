@@ -18,6 +18,12 @@
  * mic sampling on a plain disconnect, which drains the battery) and then drops the link. One
  * WebSocket carries both directions, replacing the earlier per-flush HTTPS posts.
  *
+ * Mic level: the relayed mic samples are decimated, and the raw 12-bit signal moves only tens to
+ * hundreds of counts for speech (measured on real hardware), which no waveform chart shows well.
+ * So each flush also carries micRms -- the RMS of every received mic sample (full 8 kHz, not
+ * decimated) after removing each 91-sample packet's own mean, so ADC offset drift between packets
+ * doesn't count as sound -- which the app turns into a level meter.
+ *
  * Data path (after a crash loop on real hardware): notifications arrive on the NimBLE host task
  * while flushing runs on the Arduino loop task, so buffers are fixed-size arrays behind a
  * spinlock, JSON is written straight into one pre-reserved String, and nothing network-related
@@ -103,6 +109,12 @@ static SampleBuf bufFsm = { fsmStore, FSM_CAP, 0, 0 };
 static portMUX_TYPE bufMux = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t micDecimationCounter = 0;
 
+// Full-rate mic energy since the last flush (see the header note on micRms). Guarded by bufMux.
+static double   micEnergySum   = 0;
+static uint32_t micEnergyCount = 0;
+static uint16_t micPeakDev     = 0;
+static float    lastMicRms     = 0; // for the serial log only
+
 // Raw notification counts per characteristic, logged every few seconds -- tells "the patch never
 // sends this channel" apart from "the bridge drops it" without any debugger on the patch.
 static volatile uint32_t notifAcc = 0, notifMic = 0, notifFsm = 0;
@@ -119,7 +131,28 @@ void notifyCallback(NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t le
   if (!buf) return;
 
   size_t count = length / 2;
+
+  double packetEnergy = 0;
+  uint16_t packetPeak = 0;
+  if (isMic && count) {
+    // Mean-remove per packet, then sum squares -- done before taking the lock (pure arithmetic).
+    uint32_t sum = 0;
+    for (size_t i = 0; i < count; i++) sum += (uint16_t)pData[i * 2] | ((uint16_t)pData[i * 2 + 1] << 8);
+    float mean = (float)sum / count;
+    for (size_t i = 0; i < count; i++) {
+      float dev = ((uint16_t)pData[i * 2] | ((uint16_t)pData[i * 2 + 1] << 8)) - mean;
+      packetEnergy += dev * dev;
+      uint16_t absDev = (uint16_t)(dev < 0 ? -dev : dev);
+      if (absDev > packetPeak) packetPeak = absDev;
+    }
+  }
+
   portENTER_CRITICAL(&bufMux);
+  if (isMic && count) {
+    micEnergySum += packetEnergy;
+    micEnergyCount += count;
+    if (packetPeak > micPeakDev) micPeakDev = packetPeak;
+  }
   for (size_t i = 0; i < count; i++) {
     if (isMic && (micDecimationCounter++ % MIC_DECIMATION) != 0) continue;
     if (buf->len >= buf->cap) { buf->dropped++; continue; }
@@ -320,6 +353,9 @@ void flushBuffers() {
   // Take the samples under the lock (a memcpy -- microseconds), then do all slow work outside it.
   size_t micN, accN, fsmN;
   uint32_t dropped;
+  double energy;
+  uint32_t energyCount;
+  uint16_t peak;
   portENTER_CRITICAL(&bufMux);
   micN = bufMic.len; accN = bufAcc.len; fsmN = bufFsm.len;
   memcpy(micOut, micStore, micN * sizeof(uint16_t));
@@ -328,18 +364,26 @@ void flushBuffers() {
   bufMic.len = bufAcc.len = bufFsm.len = 0;
   dropped = bufMic.dropped + bufAcc.dropped + bufFsm.dropped;
   bufMic.dropped = bufAcc.dropped = bufFsm.dropped = 0;
+  energy = micEnergySum; energyCount = micEnergyCount; peak = micPeakDev;
+  micEnergySum = 0; micEnergyCount = 0; micPeakDev = 0;
   portEXIT_CRITICAL(&bufMux);
 
   if (dropped) Serial.printf("[BLE] %u samples dropped (buffer full)\n", dropped);
   if (!micN && !accN && !fsmN) return;
 
-  String s = broadcastStart("sample", (micN + accN + fsmN) * 6 + 32);
+  String s = broadcastStart("sample", (micN + accN + fsmN) * 6 + 64);
   s += '{';
   appendArray(s, "mic", micOut, micN);
   s += ',';
   appendArray(s, "acc", accOut, accN);
   s += ',';
   appendArray(s, "fsm", fsmOut, fsmN);
+  if (energyCount) {
+    lastMicRms = sqrt(energy / energyCount);
+    char level[48];
+    snprintf(level, sizeof(level), ",\"micRms\":%.1f,\"micPeak\":%u", lastMicRms, peak);
+    s += level;
+  }
   s += '}';
   // A failed send loses that half-second of live data rather than retrying it -- this is a live
   // view, and retrying is what once let memory grow until the board crashed.
@@ -516,8 +560,8 @@ void loop() {
   static unsigned long lastNotifLog = 0;
   if (patchConnected && millis() - lastNotifLog >= 5000) {
     lastNotifLog = millis();
-    Serial.printf("[BLE] notifications last 5s: acc=%u mic=%u fsm=%u (free heap %u)\n",
-                  notifAcc, notifMic, notifFsm, ESP.getFreeHeap());
+    Serial.printf("[BLE] notifications last 5s: acc=%u mic=%u fsm=%u micRms=%.1f (free heap %u)\n",
+                  notifAcc, notifMic, notifFsm, lastMicRms, ESP.getFreeHeap());
     notifAcc = notifMic = notifFsm = 0;
   }
 

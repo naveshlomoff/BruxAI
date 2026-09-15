@@ -635,6 +635,7 @@ document.addEventListener('touchstart', function iosUnlock() {
         relays the data through Supabase — no Bluetooth needed in this browser, works the same on
         iPhone, Android, or a computer. The bridge connects to the patch only while you ask it to
         (and drops it 90 s after this page closes). Setup: <code>patch-bridge/README.md</code> in the repo.
+        <br>Patch UI version: 2026-09-15 mic-meter
       </div>
 
       <button id="patch-connect-btn" onclick="patchToggleConnect()" disabled style="width:100%;margin-bottom:10px;font-family:var(--mono);font-size:11px;padding:10px 14px;border-radius:8px;background:var(--accentlt);border:0.5px solid #c4b5fd;color:var(--accent2);cursor:pointer;letter-spacing:0.06em;text-transform:uppercase">Bridge offline</button>
@@ -650,7 +651,8 @@ document.addEventListener('touchstart', function iosUnlock() {
       <div class="card">
         <div class="label">Microphone · 8 kHz</div>
         <canvas id="patch-canvas-mic" class="patch-canvas"></canvas>
-        <div class="stat-lbl" style="text-align:right;margin-top:2px" id="patch-count-mic">0 samples</div>
+        <div style="height:8px;border-radius:4px;background:var(--bg2);border:0.5px solid var(--border);margin-top:6px;overflow:hidden"><div id="patch-mic-meter-fill" style="height:100%;width:0%;background:var(--accent);transition:width 0.2s"></div></div>
+        <div class="stat-lbl" style="display:flex;justify-content:space-between;margin-top:2px"><span id="patch-mic-meter-label">level —</span><span id="patch-count-mic">0 samples</span></div>
       </div>
 
       <div class="card">
@@ -2456,6 +2458,7 @@ function patchApplyOffline() {
 
 function patchOnBroadcastSample(payload) {
   patchApplyBridgeState('connected');
+  if (typeof payload.micRms === 'number') patchUpdateMicLevel(payload.micRms);
   for (const channel of ['mic', 'acc', 'fsm']) {
     const values = payload[channel];
     if (!values || !values.length) continue;
@@ -2494,6 +2497,7 @@ function patchDrawChart(channel) {
   c.width = W * (devicePixelRatio || 1); c.height = H * (devicePixelRatio || 1);
   ctx.scale(devicePixelRatio || 1, devicePixelRatio || 1);
   ctx.clearRect(0, 0, W, H);
+  if (channel === 'mic' && patchMic.history.length) { patchDrawMicLevels(ctx, W, H); return; }
   const samples = patchState.buffers[channel];
   if (!samples.length) return;
   // Auto-scale around the visible window. A fixed 0-65535 scale drew every channel as a flat line:
@@ -2519,6 +2523,41 @@ function patchDrawChart(channel) {
 // acc: magnitude, ~16000 at rest = 1 g; fsm: 12-bit ADC counts).
 // Mic measured on real hardware: idle p-p ~50-80, talking nearby ~150-200, a clap/tap 400-850.
 const PATCH_CHART_MIN_SPAN = { mic: 200, acc: 2000, fsm: 200 };
+
+// Mic level meter, fed by the bridge's micRms (full-rate RMS per 0.5 s flush, see BroxMonBridge.ino).
+// Speech lifts the raw 12-bit signal only modestly above idle noise, so the meter shows how far the
+// level is above this room's quiet floor, in dB, rather than absolute counts.
+const PATCH_MIC_HISTORY = 40;  // bars in the level chart (~20 s)
+const PATCH_MIC_METER_DB = 18; // meter full scale, dB above the quiet floor
+const patchMic = { rms: [], history: [] };
+
+function patchUpdateMicLevel(rms) {
+  patchMic.rms.push(rms);
+  if (patchMic.rms.length > 60) patchMic.rms.shift();
+  // Quiet floor = 20th percentile of the last ~30 s: one odd reading can't skew it, and a few
+  // seconds of talking don't raise it.
+  const sorted = [...patchMic.rms].sort((a, b) => a - b);
+  const floor = Math.max(0.5, sorted[Math.floor(sorted.length * 0.2)]);
+  const db = Math.max(0, 20 * Math.log10(Math.max(rms, 0.5) / floor));
+  patchMic.history.push(db);
+  if (patchMic.history.length > PATCH_MIC_HISTORY) patchMic.history.shift();
+  const fill = document.getElementById('patch-mic-meter-fill');
+  if (fill) fill.style.width = Math.min(100, (db / PATCH_MIC_METER_DB) * 100).toFixed(0) + '%';
+  const label = document.getElementById('patch-mic-meter-label');
+  if (label) label.textContent = 'level +' + db.toFixed(1) + ' dB (rms ' + rms.toFixed(1) + ')';
+}
+
+function patchDrawMicLevels(ctx, W, H) {
+  const barW = W / PATCH_MIC_HISTORY;
+  ctx.fillStyle = '#a5b4fc';
+  patchMic.history.forEach((db, i) => {
+    const h = Math.max(1, Math.min(1, db / PATCH_MIC_METER_DB) * (H - 14));
+    const x = W - (patchMic.history.length - i) * barW;
+    ctx.fillRect(x + 1, H - h, Math.max(1, barW - 2), h);
+  });
+  ctx.fillStyle = '#8b8fa8'; ctx.font = '9px ui-monospace, monospace';
+  ctx.fillText('level above quiet · last 20 s', 4, 10);
+}
 
 function patchSetStatus(connState) {
   patchState.connState = connState;
