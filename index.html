@@ -2864,6 +2864,7 @@ async function patchSaveSessionToCloud(session, quiet) {
     console.warn('[patch] cloud save failed', e);
     if (!quiet) toast('Patch session saved on this device only — cloud: ' + (e?.message || e), 5000);
   }
+  patchRenderSessionHistory(); // refresh the per-session cloud badge
 }
 
 let patchPendingSyncRunning = false;
@@ -2942,11 +2943,36 @@ async function patchRenderSessionHistory() {
     const row = document.createElement('div');
     row.className = 'patch-session-row';
     row.innerHTML = `<div><div class="event-time">${dt.toLocaleDateString()} · ${dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
-        <div class="stat-lbl">${durMin} min session</div></div>
+        <div class="stat-lbl">${durMin} min session</div>
+        <div class="stat-lbl" data-cloud-sid="${s.sessionId}" style="color:var(--text3)">cloud: checking…</div></div>
       <div class="pill pill-purple">${s.events.length} events</div>`;
     row.onclick = () => patchShowReport(s);
     listEl.appendChild(row);
   });
+  patchMarkCloudStatus(listEl, sessions);
+}
+
+// Asks Supabase which of these recordings really exist there (RLS lets each user read their own
+// patch_sessions rows) — a real check the user can see on the phone, not just "the upload call ran".
+async function patchMarkCloudStatus(listEl, sessions) {
+  const mark = (sid, text, color) => {
+    const el = listEl.querySelector(`[data-cloud-sid="${sid}"]`);
+    if (el) { el.textContent = text; el.style.color = color; }
+  };
+  if (!supabase || !state.user) {
+    sessions.forEach(s => mark(s.sessionId, 'on this device only — not signed in yet', 'var(--text3)'));
+    return;
+  }
+  const { data, error } = await supabase.from('patch_sessions')
+    .select('session_id').in('session_id', sessions.map(s => s.sessionId));
+  if (error) {
+    sessions.forEach(s => mark(s.sessionId, 'cloud check failed: ' + error.message, 'var(--red)'));
+    return;
+  }
+  const inCloud = new Set((data || []).map(r => Number(r.session_id)));
+  sessions.forEach(s => inCloud.has(Number(s.sessionId))
+    ? mark(s.sessionId, '☁ saved to cloud', 'var(--green)')
+    : mark(s.sessionId, 'on this device only — will retry upload', 'var(--amber)'));
 }
 
 function renderPatchScreen() {
