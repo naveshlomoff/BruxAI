@@ -1,69 +1,65 @@
 /*
  * BroxMon Bridge — BLE-to-Supabase relay for the BroxMon patch.
  *
- * v2: relays through Supabase Realtime Broadcast instead of serving its own local web page.
- *
- * Why: the first version (local WebSocket + a page served by this device) worked, but only at a
- * URL separate from the real app (naveshlomoff.github.io/BruxAI) -- and it fundamentally could
- * only ever work that way. A page served over HTTPS (which GitHub Pages forces) can never open a
- * plain ws:// connection to a device on the local network -- every browser, Safari included,
- * blocks that as mixed content, and there is no way to get a real trusted TLS certificate for a
- * device on a private home network. Routing through Supabase (which BruxAI's own index.html
- * already loads supabase-js for) sidesteps this entirely: Supabase's realtime endpoint has a
- * normal, properly-trusted certificate, so the SAME naveshlomoff.github.io/BruxAI/ page can
- * subscribe to it directly, on any device, without ever touching the local network.
+ * Why a bridge at all: iOS has no Web Bluetooth, and a page served over HTTPS (GitHub Pages) can
+ * never talk to a device on the local network (mixed content). So this ESP32 is the only
+ * Bluetooth central: it talks to the patch directly and relays everything through Supabase
+ * Realtime, which the SAME naveshlomoff.github.io/BruxAI/ page already subscribes to -- from any
+ * device, on any network.
  *
  * Architecture:
- *   BroxMon01 (patch) --BLE (NimBLE central)--> ESP32 --HTTPS POST (Supabase Realtime Broadcast
- *   REST API)--> Supabase --wss (already-loaded supabase-js)--> naveshlomoff.github.io/BruxAI/
- *   Patch tab, from any device, on any network.
+ *   BroxMon01 (patch) --BLE (NimBLE central)--> ESP32 --wss (Supabase Realtime, Phoenix
+ *   protocol)--> Supabase --wss (supabase-js)--> BruxAI Patch tab, on any device.
  *
- * This device never serves anything and never needs to be reachable from the browser at all --
- * it only ever makes outbound HTTPS requests, so it works from anywhere with Wi-Fi + internet,
- * not just the same LAN as the browser.
+ * v3: connect on demand. The bridge no longer grabs the patch at boot. It joins the Realtime
+ * channel, announces itself every few seconds, and connects to the patch only when the app sends
+ * a "connect" command (the Patch tab's Connect button). "disconnect" -- or 90 s without the app's
+ * keepalive, e.g. the page was closed -- first turns the patch's mic off (its firmware never stops
+ * mic sampling on a plain disconnect, which drains the battery) and then drops the link. One
+ * WebSocket carries both directions, replacing the earlier per-flush HTTPS posts.
  *
- * Wi-Fi setup is self-service, not hardcoded: this device moves between locations (home, office
- * demos, ...), and a password baked into the source would also sit in this public repo's git
- * history forever. WiFiManager (see setupWiFi()) instead opens its own "BroxMon-Setup" network
- * with a captive portal the first time it can't reach a known one, and remembers whatever you
- * pick from then on -- hold the BOOT button for ~2s at power-on to forget it and pick again.
+ * Data path (after a crash loop on real hardware): notifications arrive on the NimBLE host task
+ * while flushing runs on the Arduino loop task, so buffers are fixed-size arrays behind a
+ * spinlock, JSON is written straight into one pre-reserved String, and nothing network-related
+ * runs inside a BLE callback.
  *
- * Data path (v2.1, after a crash loop on real hardware): the mic streams at 8 kHz, ~88 BLE
- * notifications a second. Notifications arrive on the NimBLE host task while flushing runs on
- * the Arduino loop task, so the buffers are fixed-size arrays behind a spinlock (a std::vector
- * growing on one task while the other serializes it crashed the board seconds after connecting),
- * JSON is written straight into one pre-reserved String instead of a JSON document, the HTTPS
- * connection is kept alive between posts, and nothing network-related runs inside a BLE callback.
+ * Wi-Fi setup is self-service, not hardcoded (the board moves between home and office, and a
+ * password in source would sit in this public repo forever): WiFiManager opens a "BroxMon-Setup"
+ * captive portal when no known network is reachable -- hold BOOT ~2 s at power-on to pick again.
  *
- * Libraries required (Arduino IDE > Tools > Manage Libraries): NimBLE-Arduino (h2zero) and
- * WiFiManager (tzapu). WiFi/HTTPClient/WiFiClientSecure are built into the ESP32 Arduino core.
+ * Libraries (Arduino IDE > Tools > Manage Libraries): NimBLE-Arduino (h2zero), WiFiManager
+ * (tzapu), WebSockets (Markus Sattler), ArduinoJson (Benoit Blanchon).
+ * Board: ESP32 Dev Module, Partition Scheme "Huge APP (3MB No OTA/1MB SPIFFS)".
  */
 
 #include <WiFi.h>
 #include <WiFiManager.h>
-#include <HTTPClient.h>
-#include <WiFiClientSecure.h>
+#include <WebSocketsClient.h>
+#include <ArduinoJson.h>
 #include <NimBLEDevice.h>
 
 static const int BOOT_BUTTON_PIN = 0; // GPIO0 -- the BOOT button on every common ESP32 devkit
 
-// Same project/key already hardcoded in BruxAI/index.html (SUPABASE_URL/SUPABASE_KEY) -- the
-// publishable key is meant to be public client-side, protected by RLS; using it here matches
-// the app's existing security posture, not a new exposure.
-const char* SUPABASE_URL = "https://ukoswihzqpztfypqhdnc.supabase.co";
-const char* SUPABASE_KEY = "sb_publishable_VTSRe2BT1ppguJKRhwQF3A_xr0rUtBt";
-const char* CHANNEL_TOPIC = "patch-live";
+// Same project/key already hardcoded in BruxAI/index.html -- the publishable key is meant to be
+// public client-side; using it here matches the app's existing security posture.
+const char* SUPABASE_HOST = "ukoswihzqpztfypqhdnc.supabase.co";
+const char* SUPABASE_KEY  = "sb_publishable_VTSRe2BT1ppguJKRhwQF3A_xr0rUtBt";
+const char* CHANNEL_TOPIC = "realtime:patch-live"; // supabase.channel('patch-live') in index.html
+const char* JOIN_REF      = "1";
 
-static const unsigned long FLUSH_INTERVAL_MS = 500;
-static const char*         PATCH_NAME_PREFIX = "BroxMon";
-static const char*         PATCH_ADDR_PREFIX = "00:80:e1"; // ST's OUI -- see ScanCallbacks::onResult
+static const unsigned long FLUSH_INTERVAL_MS        = 500;
+static const unsigned long STATUS_INTERVAL_MS       = 3000;
+static const unsigned long HEARTBEAT_INTERVAL_MS    = 25000; // Phoenix closes silent sockets
+static const unsigned long APP_KEEPALIVE_TIMEOUT_MS = 90000; // app sends keepalive every 15 s
+
+static const char* PATCH_NAME_PREFIX = "BroxMon";
+static const char* PATCH_ADDR_PREFIX = "00:80:e1"; // ST's OUI -- see ScanCallbacks::onResult
 
 // The mic is relayed at 8 kHz / MIC_DECIMATION. Plain subsampling keeps each second's standard
-// deviation (what the app's per-second event detector uses) while cutting the upload 4x, which
-// keeps the relay comfortably inside the ESP32's heap and Supabase's per-message limits.
+// deviation (what the app's per-second event detector uses) while cutting the upload 4x.
 static const uint32_t MIC_DECIMATION = 4;
 
-// Caps hold ~2 s of data each, so a slow or failed post can never grow memory without bound.
+// Caps hold ~2 s of data each, so a slow or failed send can never grow memory without bound.
 static const size_t MIC_CAP = 4000;
 static const size_t ACC_CAP = 1000;
 static const size_t FSM_CAP = 1000;
@@ -80,7 +76,17 @@ static volatile bool           doConnect       = false;
 static volatile bool           patchConnected  = false;
 static volatile bool           disconnectEvent = false; // set on the BLE task, handled in loop()
 static bool                    scanning        = false;
+static bool                    disconnecting   = false;
 static String                  patchDeviceName = "";
+
+// What the app asked for. Commands arrive over the WebSocket and are applied in loop().
+static bool          wantConnected  = false;
+static unsigned long lastAppContact = 0;
+static const char*   lastCommand    = "none"; // echoed in status so pages can tell who disconnected
+
+static WebSocketsClient ws;
+static bool             wsJoined = false;
+static uint32_t         wsRef    = 1;
 
 struct SampleBuf {
   uint16_t* data;
@@ -97,19 +103,19 @@ static SampleBuf bufFsm = { fsmStore, FSM_CAP, 0, 0 };
 static portMUX_TYPE bufMux = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t micDecimationCounter = 0;
 
-static WiFiClientSecure tlsClient;
-static HTTPClient       http;
-static unsigned long    lastFlush = 0;
+// Raw notification counts per characteristic, logged every few seconds -- tells "the patch never
+// sends this channel" apart from "the bridge drops it" without any debugger on the patch.
+static volatile uint32_t notifAcc = 0, notifMic = 0, notifFsm = 0;
 
-void startScan();
+void sendStatus();
 
 // ── BLE notification handler (NimBLE host task): decode 182-byte / 91 x uint16-LE packets ──
 void notifyCallback(NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
   SampleBuf* buf = nullptr;
   bool isMic = false;
-  if (pChar->getUUID().equals(CHAR_ACC_UUID)) buf = &bufAcc;
-  else if (pChar->getUUID().equals(CHAR_MIC_UUID)) { buf = &bufMic; isMic = true; }
-  else if (pChar->getUUID().equals(CHAR_FSM_UUID)) buf = &bufFsm;
+  if (pChar->getUUID().equals(CHAR_ACC_UUID)) { buf = &bufAcc; notifAcc++; }
+  else if (pChar->getUUID().equals(CHAR_MIC_UUID)) { buf = &bufMic; isMic = true; notifMic++; }
+  else if (pChar->getUUID().equals(CHAR_FSM_UUID)) { buf = &bufFsm; notifFsm++; }
   if (!buf) return;
 
   size_t count = length / 2;
@@ -145,7 +151,7 @@ class ScanCallbacks : public NimBLEScanCallbacks {
 
 class ClientCallbacks : public NimBLEClientCallbacks {
   void onDisconnect(NimBLEClient* pclient, int reason) override {
-    // Runs on the BLE host task -- only flag it; the HTTPS post and rescan happen in loop().
+    // Runs on the BLE host task -- only flag it; status and rescan happen in loop().
     patchConnected = false;
     disconnectEvent = true;
   }
@@ -166,48 +172,135 @@ void startScan() {
   pScan->start(0, false, true); // duration 0 = scan indefinitely until a match stops it
 }
 
-// ── Supabase Realtime Broadcast REST API ──
-// POST {url}/realtime/v1/api/broadcast, header apikey: <key>,
-// body {"messages":[{"topic":..., "event":..., "payload":{...}}]}. Confirmed on the live app page.
-String broadcastBodyStart(const char* event, size_t payloadReserve) {
-  String body;
-  body.reserve(payloadReserve + 96);
-  body += "{\"messages\":[{\"topic\":\"";
-  body += CHANNEL_TOPIC;
-  body += "\",\"event\":\"";
-  body += event;
-  body += "\",\"payload\":";
-  return body;
+void stopScan() {
+  if (!scanning) return;
+  NimBLEDevice::getScan()->stop();
+  scanning = false;
+  Serial.println("[BLE] scan stopped");
 }
 
-bool postBroadcastBody(const char* event, const String& body) {
-  if (WiFi.status() != WL_CONNECTED) return false;
-  // Same HTTPClient + TLS client every time with reuse on, so posts ride one kept-alive
-  // connection instead of paying a full TLS handshake (and its heap spike) twice a second.
-  if (!http.begin(tlsClient, String(SUPABASE_URL) + "/realtime/v1/api/broadcast")) return false;
-  http.addHeader("apikey", SUPABASE_KEY);
-  http.addHeader("Content-Type", "application/json");
-  int code = http.POST(body);
-  http.end();
-
-  if (code < 200 || code >= 300) {
-    Serial.printf("[Supabase] broadcast '%s' failed, HTTP %d (free heap %u)\n", event, code, ESP.getFreeHeap());
-    return false;
-  }
-  return true;
+// ── Supabase Realtime over WebSocket (Phoenix protocol, vsn 1.0.0) ──
+// Join:      {"topic":"realtime:patch-live","event":"phx_join","payload":{"config":{...}},"ref":"1","join_ref":"1"}
+// Broadcast: {"topic":...,"event":"broadcast","payload":{"type":"broadcast","event":E,"payload":{...}},"ref":N,"join_ref":"1"}
+// Verified end to end (join, send, receive, REST-to-socket) from Node before porting here.
+String nextRef() {
+  wsRef++;
+  if (wsRef < 2) wsRef = 2; // "1" is reserved for the join reply
+  return String(wsRef);
 }
 
-void sendStatus(bool connected) {
-  String body = broadcastBodyStart("status", 64);
-  body += "{\"patchConnected\":";
-  body += connected ? "true" : "false";
-  if (connected) {
-    body += ",\"deviceName\":\"";
-    body += patchDeviceName;
-    body += "\"";
+String broadcastStart(const char* event, size_t payloadReserve) {
+  String s;
+  s.reserve(payloadReserve + 160);
+  s += "{\"topic\":\"";
+  s += CHANNEL_TOPIC;
+  s += "\",\"event\":\"broadcast\",\"payload\":{\"type\":\"broadcast\",\"event\":\"";
+  s += event;
+  s += "\",\"payload\":";
+  return s;
+}
+
+bool broadcastFinish(String& s) {
+  s += "},\"ref\":\"";
+  s += nextRef();
+  s += "\",\"join_ref\":\"";
+  s += JOIN_REF;
+  s += "\"}";
+  if (!wsJoined) return false;
+  return ws.sendTXT(s);
+}
+
+const char* bridgeState() {
+  if (patchConnected) return "connected";
+  return wantConnected ? "connecting" : "idle";
+}
+
+void sendStatus() {
+  String s = broadcastStart("status", 96);
+  s += "{\"state\":\"";
+  s += bridgeState();
+  s += "\",\"patchConnected\":";
+  s += patchConnected ? "true" : "false";
+  s += ",\"lastCommand\":\"";
+  s += lastCommand;
+  s += "\"";
+  if (patchConnected) {
+    s += ",\"deviceName\":\"";
+    s += patchDeviceName;
+    s += "\"";
   }
-  body += "}}]}";
-  postBroadcastBody("status", body);
+  s += "}";
+  broadcastFinish(s);
+}
+
+void handleCommand(const char* action) {
+  if (strcmp(action, "connect") == 0) {
+    lastAppContact = millis();
+    lastCommand = "connect";
+    if (!wantConnected) Serial.println("[CMD] connect");
+    wantConnected = true;
+  } else if (strcmp(action, "keepalive") == 0) {
+    // Only extends a connection someone asked for -- never revives one another page ended.
+    if (wantConnected) lastAppContact = millis();
+  } else if (strcmp(action, "disconnect") == 0) {
+    lastCommand = "disconnect";
+    if (wantConnected) Serial.println("[CMD] disconnect");
+    wantConnected = false;
+  } else {
+    return;
+  }
+  sendStatus();
+}
+
+void handleWsText(const uint8_t* payload, size_t length) {
+  // Only commands and small protocol replies reach us (broadcast "self" is off), but filter anyway
+  // so an unexpected large message can't blow the heap.
+  JsonDocument filter;
+  filter["event"] = true;
+  filter["ref"] = true;
+  filter["payload"]["status"] = true;
+  filter["payload"]["event"] = true;
+  filter["payload"]["payload"]["action"] = true;
+
+  JsonDocument doc;
+  if (deserializeJson(doc, (const char*)payload, length, DeserializationOption::Filter(filter))) return;
+
+  const char* event = doc["event"] | "";
+  if (strcmp(event, "phx_reply") == 0) {
+    if (!wsJoined && strcmp(doc["ref"] | "", JOIN_REF) == 0) {
+      wsJoined = strcmp(doc["payload"]["status"] | "", "ok") == 0;
+      Serial.printf("[WS] channel join %s\n", wsJoined ? "ok" : "refused");
+      if (wsJoined) sendStatus();
+    }
+    return;
+  }
+  if (strcmp(event, "broadcast") == 0 && strcmp(doc["payload"]["event"] | "", "command") == 0) {
+    handleCommand(doc["payload"]["payload"]["action"] | "");
+  }
+}
+
+void onWsEvent(WStype_t type, uint8_t* payload, size_t length) {
+  switch (type) {
+    case WStype_CONNECTED: {
+      Serial.println("[WS] connected, joining channel");
+      wsJoined = false;
+      String join = String("{\"topic\":\"") + CHANNEL_TOPIC +
+                    "\",\"event\":\"phx_join\",\"payload\":{\"config\":{\"broadcast\":{\"ack\":false,\"self\":false}," +
+                    "\"presence\":{\"key\":\"\"},\"postgres_changes\":[],\"private\":false}},\"ref\":\"" + JOIN_REF +
+                    "\",\"join_ref\":\"" + JOIN_REF + "\"}";
+      ws.sendTXT(join);
+      break;
+    }
+    case WStype_DISCONNECTED:
+      if (wsJoined) Serial.println("[WS] disconnected -- reconnecting");
+      wsJoined = false;
+      break;
+    case WStype_TEXT:
+      handleWsText(payload, length);
+      break;
+    default:
+      break;
+  }
 }
 
 static void appendArray(String& s, const char* key, const uint16_t* v, size_t n) {
@@ -240,18 +333,17 @@ void flushBuffers() {
   if (dropped) Serial.printf("[BLE] %u samples dropped (buffer full)\n", dropped);
   if (!micN && !accN && !fsmN) return;
 
-  String body = broadcastBodyStart("sample", (micN + accN + fsmN) * 6 + 32);
-  body += '{';
-  appendArray(body, "mic", micOut, micN);
-  body += ',';
-  appendArray(body, "acc", accOut, accN);
-  body += ',';
-  appendArray(body, "fsm", fsmOut, fsmN);
-  body += "}}]}";
-
-  // A failed post loses that half-second of live data rather than retrying it -- this is a live
-  // view, and retrying is what let memory grow until the board crashed.
-  postBroadcastBody("sample", body);
+  String s = broadcastStart("sample", (micN + accN + fsmN) * 6 + 32);
+  s += '{';
+  appendArray(s, "mic", micOut, micN);
+  s += ',';
+  appendArray(s, "acc", accOut, accN);
+  s += ',';
+  appendArray(s, "fsm", fsmOut, fsmN);
+  s += '}';
+  // A failed send loses that half-second of live data rather than retrying it -- this is a live
+  // view, and retrying is what once let memory grow until the board crashed.
+  broadcastFinish(s);
 }
 
 bool connectToPatch() {
@@ -268,8 +360,8 @@ bool connectToPatch() {
   }
 
   // Hub firmware fires a one-shot L2CAP connection-parameter-update ~1s after connecting
-  // (BroxMon_Firmware's app_ble.c -- "critical for reliable 8kHz audio streaming"). Waiting past
-  // that mark before touching services avoids a service-discovery race confirmed on real hardware.
+  // (BroxMon_Firmware's app_ble.c). Waiting past that mark before touching services avoids a
+  // service-discovery race confirmed on real hardware.
   delay(2000);
 
   NimBLERemoteService* pService = pClient->getService(SERVICE_UUID);
@@ -298,13 +390,42 @@ bool connectToPatch() {
 
   patchConnected = true;
   Serial.printf("[BLE] connected + subscribed (free heap %u)\n", ESP.getFreeHeap());
-  sendStatus(true);
+  sendStatus();
   return true;
 }
 
+void disconnectPatch() {
+  if (disconnecting || !pClient) return;
+  disconnecting = true;
+  Serial.println("[BLE] disconnecting -- mic off first");
+  // Writing 0 to the mic's CCCD is the only thing that runs Mic_Stop() on the patch; its mic ADC
+  // otherwise keeps sampling after the link drops, draining the battery until it's power-cycled.
+  NimBLERemoteService* svc = pClient->getService(SERVICE_UUID);
+  NimBLERemoteCharacteristic* mic = svc ? svc->getCharacteristic(CHAR_MIC_UUID) : nullptr;
+  if (mic) mic->unsubscribe();
+  pClient->disconnect(); // onDisconnect -> disconnectEvent finishes the job in loop()
+}
+
+// Brings the BLE side in line with what the app asked for.
+void applyDesiredState() {
+  if (wantConnected && millis() - lastAppContact > APP_KEEPALIVE_TIMEOUT_MS) {
+    Serial.println("[CMD] no keepalive from the app for 90 s -- disconnecting");
+    wantConnected = false;
+    lastCommand = "timeout";
+    sendStatus();
+  }
+
+  if (wantConnected) {
+    if (!patchConnected && !doConnect) startScan();
+  } else {
+    stopScan();
+    doConnect = false;
+    if (patchConnected) disconnectPatch();
+  }
+}
+
 // Tries the last-saved network first (fast, silent if already known); only if that fails does it
-// fall back to opening the "BroxMon-Setup" portal. Safe to call again on a dropped connection --
-// a still-in-range known network reconnects quickly without ever showing the portal again.
+// fall back to opening the "BroxMon-Setup" portal.
 void setupWiFi() {
   WiFiManager wm;
   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
@@ -331,21 +452,21 @@ void setupWiFi() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\n=== BroxMon Bridge (Supabase relay) starting ===");
+  Serial.println("\n=== BroxMon Bridge (connect on demand) starting ===");
 
   setupWiFi();
 
-  tlsClient.setInsecure(); // skip cert pinning: avoids a brittle hardcoded root CA that breaks on
-                           // rotation, and this payload is non-sensitive sensor waveform data --
-                           // same tradeoff many ESP32-to-cloud-API sketches make.
-  http.setReuse(true);
-  http.setTimeout(5000);
+  // No fingerprint/CA -> the library calls setInsecure(): avoids a brittle pinned root CA that
+  // breaks on rotation; the payload is non-sensitive sensor waveform data. Empty protocol string
+  // omits the Sec-WebSocket-Protocol header, which Supabase doesn't use.
+  String path = String("/realtime/v1/websocket?apikey=") + SUPABASE_KEY + "&vsn=1.0.0";
+  ws.beginSSL(SUPABASE_HOST, 443, path.c_str(), "", "");
+  ws.onEvent(onWsEvent);
+  ws.setReconnectInterval(3000);
 
   NimBLEDevice::init("");
-  startScan();
 
-  lastFlush = millis();
-  Serial.println("=== Ready ===");
+  Serial.println("=== Ready -- waiting for Connect in the app ===");
 }
 
 void loop() {
@@ -354,25 +475,50 @@ void loop() {
     setupWiFi();
   }
 
+  ws.loop();
+
   if (disconnectEvent) {
     disconnectEvent = false;
+    disconnecting = false;
     Serial.println("[BLE] patch disconnected");
-    sendStatus(false);
-    startScan();
+    sendStatus();
   }
 
   if (doConnect) {
     doConnect = false;
     scanning = false;
-    if (!connectToPatch()) {
-      delay(1000);
-      startScan();
-    }
+    if (wantConnected && !connectToPatch()) delay(1000); // applyDesiredState rescans
   }
 
+  applyDesiredState();
+
+  static unsigned long lastHeartbeat = 0;
+  if (ws.isConnected() && millis() - lastHeartbeat >= HEARTBEAT_INTERVAL_MS) {
+    lastHeartbeat = millis();
+    String hb = String("{\"topic\":\"phoenix\",\"event\":\"heartbeat\",\"payload\":{},\"ref\":\"") + nextRef() + "\"}";
+    ws.sendTXT(hb);
+  }
+
+  // Broadcasts aren't stored, so a page opened later only learns the bridge's state from the next
+  // status -- re-announce it (idle included, so the app can tell "bridge offline" from "idle").
+  static unsigned long lastStatus = 0;
+  if (wsJoined && millis() - lastStatus >= STATUS_INTERVAL_MS) {
+    lastStatus = millis();
+    sendStatus();
+  }
+
+  static unsigned long lastFlush = 0;
   if (patchConnected && millis() - lastFlush >= FLUSH_INTERVAL_MS) {
     lastFlush = millis();
     flushBuffers();
+  }
+
+  static unsigned long lastNotifLog = 0;
+  if (patchConnected && millis() - lastNotifLog >= 5000) {
+    lastNotifLog = millis();
+    Serial.printf("[BLE] notifications last 5s: acc=%u mic=%u fsm=%u (free heap %u)\n",
+                  notifAcc, notifMic, notifFsm, ESP.getFreeHeap());
+    notifAcc = notifMic = notifFsm = 0;
   }
 
   delay(5);

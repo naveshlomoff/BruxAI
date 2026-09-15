@@ -626,15 +626,18 @@ document.addEventListener('touchstart', function iosUnlock() {
         <div class="app-title" style="color:var(--accent)">BSI-EBI Patch</div>
         <div class="app-sub">Wearable sensor · via BroxMon Bridge</div>
       </div>
-      <div id="patch-status" class="pill pill-red"><span class="pulse"></span>disconnected</div>
+      <div id="patch-status" class="pill pill-red"><span class="pulse"></span>bridge offline</div>
     </div>
     <div class="scroll"><div class="pad">
 
       <div class="tip-box">
         A BroxMon Bridge (a small ESP32 next to the patch) talks Bluetooth to it directly and
         relays the data through Supabase — no Bluetooth needed in this browser, works the same on
-        iPhone, Android, or a computer. Setup: <code>patch-bridge/README.md</code> in the repo.
+        iPhone, Android, or a computer. The bridge connects to the patch only while you ask it to
+        (and drops it 90 s after this page closes). Setup: <code>patch-bridge/README.md</code> in the repo.
       </div>
+
+      <button id="patch-connect-btn" onclick="patchToggleConnect()" disabled style="width:100%;margin-bottom:10px;font-family:var(--mono);font-size:11px;padding:10px 14px;border-radius:8px;background:var(--accentlt);border:0.5px solid #c4b5fd;color:var(--accent2);cursor:pointer;letter-spacing:0.06em;text-transform:uppercase">Bridge offline</button>
 
       <div class="card">
         <div class="stats-grid">
@@ -2334,7 +2337,7 @@ async function uploadClipToCloud(eventId, sessionId, nightCloudId, retries = 2) 
 const PATCH_BUFFER_MAX = 300;
 
 const patchState = {
-  connState: 'disconnected', // disconnected | connected — mirrors the bridge's last "status" broadcast
+  connState: 'offline', // offline | idle | connecting | connected — from the bridge's periodic status
   recording: false,
   sampleCount: 0,
   buffers: { mic: [], acc: [], fsm: [] },
@@ -2368,9 +2371,91 @@ function patchUpdateBucket(channel, ts, values) {
   }
 }
 
-// One "sample" broadcast = one flush interval from the bridge (~1s), carrying every sample
+// One "sample" broadcast = one flush interval from the bridge (~0.5s), carrying every sample
 // accumulated since the last flush per channel — not a 1:1 mirror of individual BLE packets.
+//
+// The bridge connects to the patch only on demand: this page's Connect button sends "connect",
+// keepalives hold the link, and "disconnect" (or 90 s without a keepalive, e.g. the page closed)
+// ends it. Broadcasts aren't stored, so a page opened mid-session (seen on iPhone: live samples
+// under a "disconnected" badge) learns the bridge's state from its status every 3 s, and
+// PATCH_STALE_MS without any status or sample means the bridge itself is offline.
+const PATCH_STALE_MS = 8000;
+const PATCH_KEEPALIVE_MS = 15000;
+const PATCH_CONNECT_RETRY_MS = 5000;
+let patchStaleTimer = null;
+let patchChannel = null;
+let patchWantConnected = false; // this page asked for the patch
+let patchConnectAcked = false;  // ...and the bridge has since reported connecting/connected
+let patchConnectSentAt = 0;
+let patchKeepaliveTimer = null;
+
+function patchSendCommand(action) {
+  if (!patchChannel) return;
+  patchChannel.send({ type: 'broadcast', event: 'command', payload: { action } });
+  if (action === 'connect') patchConnectSentAt = Date.now();
+}
+
+function patchToggleConnect() {
+  const s = patchState.connState;
+  if (patchWantConnected || s === 'connected' || s === 'connecting') {
+    // Also works from a page that found the patch already connected by another device or tab.
+    patchWantConnected = false;
+    clearInterval(patchKeepaliveTimer);
+    patchSendCommand('disconnect');
+  } else {
+    patchWantConnected = true;
+    patchConnectAcked = false;
+    patchSendCommand('connect');
+    clearInterval(patchKeepaliveTimer);
+    patchKeepaliveTimer = setInterval(() => patchSendCommand('keepalive'), PATCH_KEEPALIVE_MS);
+  }
+  patchRenderConnectButton();
+}
+
+function patchRenderConnectButton() {
+  const btn = document.getElementById('patch-connect-btn');
+  if (!btn) return;
+  const s = patchState.connState;
+  if (s === 'offline')                               { btn.textContent = 'Bridge offline'; btn.disabled = true; }
+  else if (s === 'connected')                        { btn.textContent = 'Disconnect patch'; btn.disabled = false; }
+  else if (s === 'connecting' || patchWantConnected) { btn.textContent = 'Connecting… tap to cancel'; btn.disabled = false; }
+  else                                               { btn.textContent = 'Connect to patch'; btn.disabled = false; }
+}
+
+// state: 'idle' | 'connecting' | 'connected', from a bridge status (or implied by a sample).
+function patchApplyBridgeState(state, deviceName) {
+  clearTimeout(patchStaleTimer);
+  patchStaleTimer = setTimeout(patchApplyOffline, PATCH_STALE_MS);
+
+  if (patchWantConnected && state !== 'idle') patchConnectAcked = true;
+  if (patchWantConnected && state === 'idle') {
+    if (patchConnectAcked) {
+      // It was connecting/connected for us and then ended elsewhere (another page's Disconnect,
+      // or the bridge's keepalive timeout after this page was suspended) — stop holding it.
+      patchWantConnected = false;
+      clearInterval(patchKeepaliveTimer);
+    } else if (Date.now() - patchConnectSentAt > PATCH_CONNECT_RETRY_MS) {
+      patchSendCommand('connect'); // our connect never arrived (bridge was rebooting) — ask again
+    }
+  }
+
+  if (patchState.connState !== state) patchSetStatus(state);
+  else patchRenderConnectButton();
+  const deviceNameEl = document.getElementById('patch-stat-device');
+  if (deviceNameEl) {
+    if (state !== 'connected') deviceNameEl.textContent = '—';
+    else if (deviceName || deviceNameEl.textContent === '—') deviceNameEl.textContent = deviceName || 'BroxMon';
+  }
+}
+
+function patchApplyOffline() {
+  if (patchState.connState !== 'offline') patchSetStatus('offline');
+  const deviceNameEl = document.getElementById('patch-stat-device');
+  if (deviceNameEl) deviceNameEl.textContent = '—';
+}
+
 function patchOnBroadcastSample(payload) {
+  patchApplyBridgeState('connected');
   for (const channel of ['mic', 'acc', 'fsm']) {
     const values = payload[channel];
     if (!values || !values.length) continue;
@@ -2385,16 +2470,17 @@ function patchOnBroadcastSample(payload) {
 }
 
 function patchOnBroadcastStatus(payload) {
-  patchSetStatus(payload.patchConnected ? 'connected' : 'disconnected');
-  const deviceNameEl = document.getElementById('patch-stat-device');
-  if (deviceNameEl) deviceNameEl.textContent = payload.patchConnected ? (payload.deviceName || 'BroxMon') : '—';
+  // Bridges from before connect-on-demand only sent patchConnected.
+  const state = payload.state || (payload.patchConnected ? 'connected' : 'idle');
+  patchApplyBridgeState(state, payload.deviceName);
 }
 
-// Subscribes to the bridge's Supabase Realtime channel. Called once from init() after the shared
-// `supabase` client exists; retries briefly if it isn't ready yet.
+// Subscribes to the bridge's Supabase Realtime channel (also used to send it commands). Called
+// once from init() after the shared `supabase` client exists; retries briefly if it isn't ready.
 function patchInitRealtime() {
   if (!supabase) { setTimeout(patchInitRealtime, 500); return; }
-  supabase.channel('patch-live')
+  patchChannel = supabase.channel('patch-live');
+  patchChannel
     .on('broadcast', { event: 'sample' }, (msg) => patchOnBroadcastSample(msg.payload))
     .on('broadcast', { event: 'status' }, (msg) => patchOnBroadcastStatus(msg.payload))
     .subscribe();
@@ -2424,15 +2510,19 @@ function patchSetStatus(connState) {
   patchState.connState = connState;
   const pill = document.getElementById('patch-status');
   const recBtn = document.getElementById('patch-record-btn');
-  if (!pill) return;
-  const map = {
-    disconnected: ['pill pill-red',   'disconnected'],
-    connected:    ['pill pill-green', 'connected'],
-  };
-  const [cls, label] = map[connState] || map.disconnected;
-  pill.className = cls;
-  pill.innerHTML = '<span class="pulse"></span>' + label;
+  if (pill) {
+    const map = {
+      offline:    ['pill pill-red',   'bridge offline'],
+      idle:       ['pill pill-red',   'disconnected'],
+      connecting: ['pill pill-amber', 'connecting'],
+      connected:  ['pill pill-green', 'connected'],
+    };
+    const [cls, label] = map[connState] || map.offline;
+    pill.className = cls;
+    pill.innerHTML = '<span class="pulse"></span>' + label;
+  }
   if (recBtn) recBtn.disabled = connState !== 'connected';
+  patchRenderConnectButton();
 }
 
 function patchToggleRecording() {
