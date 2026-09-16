@@ -156,6 +156,8 @@ html, body {
 .patch-rec-btn.is-recording::before { border-radius: 3px; background: var(--red); animation: pulse 1.4s ease-in-out infinite; }
 .patch-rec-btn:disabled { background: var(--bg3); border-color: var(--border2); color: var(--text3); box-shadow: none; cursor: default; }
 .patch-rec-btn:disabled::before { background: var(--text3); opacity: .5; }
+.patch-wifi-btn { display: block; margin: 16px auto 0; background: none; border: none; font-family: var(--mono); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--accent2); cursor: pointer; padding: 6px 10px; }
+.patch-wifi-btn:disabled { color: var(--text3); opacity: .6; cursor: default; }
 .patch-version { text-align: center; font-family: var(--mono); font-size: 8px; color: var(--text3); opacity: .6; letter-spacing: .06em; margin-top: 18px; }
 
 /* ── STATS GRID ── */
@@ -683,7 +685,8 @@ document.addEventListener('touchstart', function iosUnlock() {
         <div class="empty"><div class="empty-icon">◎</div><div class="empty-text">No patch sessions yet.</div></div>
       </div>
 
-      <div class="patch-version">Patch UI · 2026-09-15 design</div>
+      <button id="patch-wifi-btn" class="patch-wifi-btn" onclick="patchOpenWifiSetup()" disabled>+ Add Wi-Fi network</button>
+      <div class="patch-version">Patch UI · 2026-09-16 multi-wifi</div>
 
     </div></div>
   </div>
@@ -2429,6 +2432,12 @@ function patchRenderConnectButton() {
   else if (s === 'connected')                        { btn.textContent = 'Disconnect patch'; btn.disabled = false; }
   else if (s === 'connecting' || patchWantConnected) { btn.textContent = 'Connecting… tap to cancel'; btn.disabled = false; }
   else                                               { btn.textContent = 'Connect to patch'; btn.disabled = false; }
+  const wifiBtn = document.getElementById('patch-wifi-btn');
+  if (wifiBtn) {
+    const setupOpen = s !== 'offline' && !!patchState.wifiSetupOpen;
+    wifiBtn.disabled = s === 'offline' || setupOpen;
+    wifiBtn.textContent = setupOpen ? 'BroxMon-Setup is open — join it in Wi-Fi settings' : '+ Add Wi-Fi network';
+  }
 }
 
 // state: 'idle' | 'connecting' | 'connected', from a bridge status (or implied by a sample).
@@ -2487,7 +2496,16 @@ function patchOnBroadcastSample(payload) {
 function patchOnBroadcastStatus(payload) {
   // Bridges from before connect-on-demand only sent patchConnected.
   const state = payload.state || (payload.patchConnected ? 'connected' : 'idle');
+  patchState.wifiSetupOpen = !!payload.wifiSetupOpen;
   patchApplyBridgeState(state, payload.deviceName);
+}
+
+// Asks the bridge to open its "BroxMon-Setup" network so another Wi-Fi (office, phone hotspot) can be
+// added while it stays online. Only opens the portal: the password is typed on the bridge's own local
+// network, never sent over this channel.
+function patchOpenWifiSetup() {
+  patchSendCommand('wifi-setup');
+  toast('BroxMon-Setup opens for 10 min: Wi-Fi settings → BroxMon-Setup → Configure WiFi', 6000);
 }
 
 // Subscribes to the bridge's Supabase Realtime channel (also used to send it commands). Called

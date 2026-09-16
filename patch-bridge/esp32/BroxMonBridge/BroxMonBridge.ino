@@ -29,9 +29,9 @@
  * spinlock, JSON is written straight into one pre-reserved String, and nothing network-related
  * runs inside a BLE callback.
  *
- * Wi-Fi setup is self-service, not hardcoded (the board moves between home and office, and a
- * password in source would sit in this public repo forever): WiFiManager opens a "BroxMon-Setup"
- * captive portal when no known network is reachable -- hold BOOT ~2 s at power-on to pick again.
+ * Wi-Fi is self-service and multi-network, never hardcoded (a password in source would sit in this
+ * public repo forever): the board remembers up to 5 networks (home, office, a phone hotspot) and
+ * joins whichever is in range, so at a demo it only needs power -- see setupWiFi().
  *
  * Libraries (Arduino IDE > Tools > Manage Libraries): NimBLE-Arduino (h2zero), WiFiManager
  * (tzapu), WebSockets (Markus Sattler), ArduinoJson (Benoit Blanchon).
@@ -40,6 +40,8 @@
 
 #include <WiFi.h>
 #include <WiFiManager.h>
+#include <Preferences.h>
+#include <utility>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
 #include <NimBLEDevice.h>
@@ -89,6 +91,10 @@ static String                  patchDeviceName = "";
 static bool          wantConnected  = false;
 static unsigned long lastAppContact = 0;
 static const char*   lastCommand    = "none"; // echoed in status so pages can tell who disconnected
+
+// Wi-Fi setup portal state (see setupWiFi()); here because commands and status use it.
+static bool          portalActive    = false;
+static volatile bool portalRequested = false; // "Add Wi-Fi network" pressed in the app
 
 static WebSocketsClient ws;
 static bool             wsJoined = false;
@@ -256,7 +262,8 @@ void sendStatus() {
   s += patchConnected ? "true" : "false";
   s += ",\"lastCommand\":\"";
   s += lastCommand;
-  s += "\"";
+  s += "\",\"wifiSetupOpen\":";
+  s += portalActive ? "true" : "false";
   if (patchConnected) {
     s += ",\"deviceName\":\"";
     s += patchDeviceName;
@@ -279,6 +286,13 @@ void handleCommand(const char* action) {
     lastCommand = "disconnect";
     if (wantConnected) Serial.println("[CMD] disconnect");
     wantConnected = false;
+  } else if (strcmp(action, "wifi-setup") == 0) {
+    // "Add Wi-Fi network" in the app: open the portal without dropping the current network.
+    // Only opens the portal -- credentials are typed on the board's own local network, never sent
+    // over this public channel.
+    Serial.println("[CMD] wifi-setup");
+    portalRequested = true;
+    return;
   } else {
     return;
   }
@@ -468,29 +482,203 @@ void applyDesiredState() {
   }
 }
 
-// Tries the last-saved network first (fast, silent if already known); only if that fails does it
-// fall back to opening the "BroxMon-Setup" portal.
+// ── Wi-Fi: several remembered networks, joins whichever is in range ──
+// The board travels (home, office, a phone hotspot at demos) and has to just work when plugged in.
+// It keeps up to MAX_KNOWN_NETWORKS credentials in its own flash (never in this repo), newest first.
+// On power-up, and whenever the link drops, it scans and joins the strongest known network in range.
+// The "BroxMon-Setup" portal only opens when none is, and closes by itself once one appears (e.g. the
+// phone hotspot gets switched on). "Add Wi-Fi network" in the app (or a short press on BOOT) opens it
+// to ADD a network without dropping the current one; a network can be added even when it isn't in
+// range (the office from home, or the phone's own hotspot -- a phone can't host a hotspot while it's
+// on the portal). Holding BOOT at power-on forgets every network.
+static const int           MAX_KNOWN_NETWORKS   = 5;
+static const char*         SETUP_AP_NAME        = "BroxMon-Setup";
+static const unsigned long WIFI_RETRY_MS        = 10000;  // offline: rescan for known networks
+static const unsigned long PORTAL_IDLE_CLOSE_MS = 600000; // an on-demand portal nobody used
+
+struct KnownNetwork { String ssid; String pass; };
+static KnownNetwork  knownNetworks[MAX_KNOWN_NETWORKS];
+static int           knownCount     = 0;
+
+static WiFiManager   wm;
+static bool          portalOnDemand = false; // opened to add a network while already online
+static unsigned long portalOpenedAt = 0;
+static volatile bool portalSaved    = false; // set by WiFiManager's save callback
+
+void loadKnownNetworks() {
+  Preferences prefs;
+  prefs.begin("wifi", true);
+  knownCount = std::max(0, std::min((int)prefs.getInt("n", 0), MAX_KNOWN_NETWORKS));
+  for (int i = 0; i < knownCount; i++) {
+    knownNetworks[i].ssid = prefs.getString(("s" + String(i)).c_str(), "");
+    knownNetworks[i].pass = prefs.getString(("p" + String(i)).c_str(), "");
+  }
+  prefs.end();
+}
+
+void saveKnownNetworks() {
+  Preferences prefs;
+  prefs.begin("wifi", false);
+  prefs.clear();
+  prefs.putInt("n", knownCount);
+  for (int i = 0; i < knownCount; i++) {
+    prefs.putString(("s" + String(i)).c_str(), knownNetworks[i].ssid);
+    prefs.putString(("p" + String(i)).c_str(), knownNetworks[i].pass);
+  }
+  prefs.end();
+}
+
+// Newest first: re-adding a network (e.g. with a corrected password) replaces the old entry and moves
+// it to the front; when the list is full the oldest one drops off.
+void rememberNetwork(const String& ssid, const String& pass) {
+  if (!ssid.length()) return;
+  for (int i = 0; i < knownCount; i++) {
+    if (knownNetworks[i].ssid != ssid) continue;
+    for (int j = i; j < knownCount - 1; j++) knownNetworks[j] = knownNetworks[j + 1];
+    knownCount--;
+    break;
+  }
+  if (knownCount == MAX_KNOWN_NETWORKS) knownCount--;
+  for (int i = knownCount; i > 0; i--) knownNetworks[i] = knownNetworks[i - 1];
+  knownNetworks[0].ssid = ssid;
+  knownNetworks[0].pass = pass;
+  knownCount++;
+  saveKnownNetworks();
+  Serial.printf("[WiFi] remembered '%s' (%d known networks)\n", ssid.c_str(), knownCount);
+}
+
+// One scan, then each remembered network that's in range, strongest first. Blocks while trying (up to
+// ~12 s per network); BLE notifications keep landing in their buffers meanwhile.
+bool connectKnownNetwork() {
+  if (!knownCount) return false;
+  int found = WiFi.scanNetworks();
+  int order[MAX_KNOWN_NETWORKS], rssi[MAX_KNOWN_NETWORKS], candidates = 0;
+  for (int k = 0; k < knownCount && found > 0; k++) {
+    int best = -1000;
+    for (int i = 0; i < found; i++) {
+      if (WiFi.SSID(i) == knownNetworks[k].ssid && WiFi.RSSI(i) > best) best = WiFi.RSSI(i);
+    }
+    if (best > -1000) { order[candidates] = k; rssi[candidates] = best; candidates++; }
+  }
+  WiFi.scanDelete();
+  for (int i = 1; i < candidates; i++) {
+    for (int j = i; j > 0 && rssi[j] > rssi[j - 1]; j--) {
+      std::swap(rssi[j], rssi[j - 1]);
+      std::swap(order[j], order[j - 1]);
+    }
+  }
+  if (!candidates) {
+    Serial.printf("[WiFi] none of the %d known networks is in range\n", knownCount);
+    return false;
+  }
+  for (int c = 0; c < candidates; c++) {
+    const KnownNetwork& net = knownNetworks[order[c]];
+    Serial.printf("[WiFi] trying '%s' (rssi %d)\n", net.ssid.c_str(), rssi[c]);
+    WiFi.begin(net.ssid.c_str(), net.pass.c_str());
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 12000) delay(100);
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.printf("[WiFi] connected to '%s', IP = %s\n", net.ssid.c_str(), WiFi.localIP().toString().c_str());
+      return true;
+    }
+    WiFi.disconnect();
+  }
+  return false;
+}
+
+void startSetupPortal(bool onDemand) {
+  if (portalActive) return;
+  portalOnDemand = onDemand;
+  portalOpenedAt = millis();
+  portalSaved = false;
+  Serial.printf("[WiFi] opening '%s' (%s)\n", SETUP_AP_NAME,
+                onDemand ? "requested -- add a network" : "no known network in range");
+  wm.startConfigPortal(SETUP_AP_NAME);
+  portalActive = true;
+  sendStatus();
+}
+
+void closeSetupPortal(const char* why) {
+  if (!portalActive) return;
+  if (wm.getConfigPortalActive()) wm.stopConfigPortal();
+  portalActive = false;
+  Serial.printf("[WiFi] '%s' closed (%s)\n", SETUP_AP_NAME, why);
+  sendStatus();
+}
+
+// Called every loop(): runs the portal, remembers what was saved in it, and rejoins a known network
+// whenever the link is down.
+void maintainWiFi() {
+  if (portalRequested) {
+    portalRequested = false;
+    startSetupPortal(true);
+  }
+  if (portalActive) {
+    wm.process();
+    if (portalSaved) {
+      portalSaved = false;
+      rememberNetwork(wm.getWiFiSSID(true), wm.getWiFiPass(true));
+      closeSetupPortal("network saved");
+    }
+  }
+
+  // Never scan while a phone is on the portal -- it would interrupt someone typing a password.
+  bool someoneOnPortal = portalActive && WiFi.softAPgetStationNum() > 0;
+
+  if (WiFi.status() == WL_CONNECTED) {
+    if (portalActive && !someoneOnPortal) {
+      if (!portalOnDemand) closeSetupPortal("joined a known network");
+      else if (millis() - portalOpenedAt > PORTAL_IDLE_CLOSE_MS) closeSetupPortal("unused for 10 minutes");
+    }
+    return;
+  }
+
+  static unsigned long lastTry = 0;
+  if (someoneOnPortal || (lastTry && millis() - lastTry < WIFI_RETRY_MS)) return;
+  lastTry = millis();
+  if (connectKnownNetwork()) {
+    if (portalActive && !portalOnDemand) closeSetupPortal("joined a known network");
+  } else if (!portalActive) {
+    startSetupPortal(false);
+  }
+}
+
+// A short press on BOOT (GPIO0) while running also opens the portal to add a network.
+void checkBootButton() {
+  static unsigned long pressedSince = 0;
+  if (digitalRead(BOOT_BUTTON_PIN) != LOW) { pressedSince = 0; return; }
+  if (!pressedSince) pressedSince = millis();
+  else if (millis() - pressedSince > 800 && !portalActive) startSetupPortal(true);
+}
+
 void setupWiFi() {
-  WiFiManager wm;
-  pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
-  if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
-    Serial.println("[WiFi] BOOT button held at startup -- forgetting saved network");
-    wm.resetSettings();
-  }
-  // Routers sometimes refuse the first association attempt ("Association refused too many times"
-  // on real hardware) -- retry a few times before giving up on the saved network.
-  wm.setConnectRetries(5);
+  WiFi.mode(WIFI_STA);
+  // The driver only reports "failed"; log why, so a bad password (15 / 204 handshake timeout,
+  // 202 auth fail) can be told apart from a missing network (201).
+  WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+    Serial.printf("[WiFi] link down, reason %u\n", info.wifi_sta_disconnected.reason);
+  }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+
+  wm.setConfigPortalBlocking(false); // the bridge keeps running (and keeps looking) while it's open
   wm.setConnectTimeout(15);
-  // Without a timeout a single refused attempt strands the device in the portal forever, even
-  // though the saved network is fine -- time out, restart, and retry the saved network instead.
-  wm.setConfigPortalTimeout(180);
-  Serial.println("[WiFi] connecting (or opening the 'BroxMon-Setup' portal if no known network is in range)...");
-  if (!wm.autoConnect("BroxMon-Setup")) {
-    Serial.println("[WiFi] no network (portal timed out) -- restarting to retry the saved network");
-    delay(2000);
-    ESP.restart();
+  wm.setBreakAfterConfig(true);      // remember a saved network even if it isn't in range right now
+  wm.setSaveConfigCallback([]() { portalSaved = true; });
+
+  pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+  loadKnownNetworks();
+  if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
+    Serial.println("[WiFi] BOOT held at power-on -- forgetting all networks");
+    knownCount = 0;
+    saveKnownNetworks();
+    wm.resetSettings();
+    WiFi.mode(WIFI_STA);
+  } else if (knownCount == 0) {
+    // First boot after the single-network firmware: its one network lives in the driver's storage.
+    String ssid = wm.getWiFiSSID(true);
+    if (ssid.length()) rememberNetwork(ssid, wm.getWiFiPass(true));
   }
-  Serial.printf("[WiFi] connected, IP = %s\n", WiFi.localIP().toString().c_str());
+  Serial.printf("[WiFi] %d known network(s)\n", knownCount);
+  if (!connectKnownNetwork()) startSetupPortal(false);
 }
 
 void setup() {
@@ -514,10 +702,8 @@ void setup() {
 }
 
 void loop() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[WiFi] connection lost, reconnecting...");
-    setupWiFi();
-  }
+  checkBootButton();
+  maintainWiFi();
 
   ws.loop();
 
