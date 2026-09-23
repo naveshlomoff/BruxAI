@@ -3301,10 +3301,12 @@ function patchCalibReset() {
   patchCalibRenderCard();
 }
 
+// Steps not tried yet come first, so a skipped step (e.g. a placement check that keeps failing)
+// doesn't block the rest; then the ones that failed, for another try.
 function patchCalibNextIndex() {
   const progress = patchCalibProgress();
-  const i = PATCH_CALIB_STEPS.findIndex(s => !progress[s.id]?.ok);
-  return i;
+  const untried = PATCH_CALIB_STEPS.findIndex(s => !progress[s.id]);
+  return untried >= 0 ? untried : PATCH_CALIB_STEPS.findIndex(s => !progress[s.id].ok);
 }
 
 function patchCalibRenderCard() {
@@ -3744,22 +3746,28 @@ function patchCalibRenderResult(result, cloudSaved) {
        ${why ? `<div class="why">${why}</div>` : ''}
        <div class="nums">${nums}</div>
        <div class="patch-calib-hint" style="margin-top:8px">${cloud}</div></div>`;
-  const next = PATCH_CALIB_STEPS.findIndex((s, i) => i > index && !patchCalibProgress()[s.id]?.ok);
-  const nextStep = next >= 0 ? PATCH_CALIB_STEPS[next] : null;
-  const moveToBed = nextStep && nextStep.where === 'bed' && step.where !== 'bed';
+  // After a good step: the next step not yet done. After a failed one: Repeat first, but the
+  // following step is offered too, so one step that keeps failing can't block the rest.
+  const progress = patchCalibProgress();
+  const target = result.ok
+    ? PATCH_CALIB_STEPS.findIndex((s, i) => i > index && !progress[s.id]?.ok)
+    : (index + 1 < PATCH_CALIB_STEPS.length ? index + 1 : -1);
+  const targetStep = target >= 0 ? PATCH_CALIB_STEPS[target] : null;
+  const moveToBed = targetStep && targetStep.where === 'bed' && step.where !== 'bed';
   // Moving to the bed means unplugging the bridge: disconnect first, because a link cut from the
   // bridge's side leaves the patch's mic running and has left acc/pressure silent until a restart.
   const connected = patchState.connState === 'connected';
+  const bedHint = moveToBed
+    ? `<div class="patch-calib-hint" style="text-align:center">עוברים למיטה: קודם לנתק את המדבקה, ורק אז להוציא את הגשר מהחשמל, להעביר ליד המיטה ולחבר שוב. בצעד הבא יהיה כפתור להתחבר.</div>
+       ${connected ? '<button class="patch-calib-btn" onclick="patchToggleConnect(); this.disabled = true; this.textContent = \'Disconnected · נותק\'">Disconnect · לנתק לפני המעבר</button>' : ''}`
+    : '';
+  const goBtn = targetStep
+    ? `<button class="patch-calib-btn ${!result.ok || (moveToBed && connected) ? 'secondary' : ''}" onclick="patchCalibOpen(${target})">${result.ok ? 'Next' : 'Skip · לדלג'} · ${targetStep.title}</button>`
+    : '';
+  const repeatBtn = `<button class="patch-calib-btn ${result.ok ? 'secondary' : ''}" onclick="patchCalibOpen(${index})">Repeat · לחזור על הצעד</button>`;
+  const doneBtn = result.ok && !targetStep ? `<button class="patch-calib-btn" onclick="patchCalibClose()">Done · סיום</button>` : '';
   document.getElementById('patch-calib-actions').innerHTML =
-    (result.ok && nextStep
-      ? (moveToBed
-          ? `<div class="patch-calib-hint" style="text-align:center">עוברים למיטה: קודם לנתק את המדבקה, ורק אז להוציא את הגשר מהחשמל, להעביר ליד המיטה ולחבר שוב. בצעד הבא יהיה כפתור להתחבר.</div>
-             ${connected ? '<button class="patch-calib-btn" onclick="patchToggleConnect(); this.disabled = true; this.textContent = \'Disconnected · נותק\'">Disconnect · לנתק לפני המעבר</button>' : ''}`
-          : '') +
-        `<button class="patch-calib-btn ${moveToBed && connected ? 'secondary' : ''}" onclick="patchCalibOpen(${next})">Next · ${nextStep.title}</button>`
-      : '') +
-    `<button class="patch-calib-btn ${result.ok ? 'secondary' : ''}" onclick="patchCalibOpen(${index})">Repeat · לחזור על הצעד</button>` +
-    (result.ok && !nextStep ? `<button class="patch-calib-btn" onclick="patchCalibClose()">Done · סיום</button>` : '');
+    result.ok ? bedHint + goBtn + doneBtn + repeatBtn : repeatBtn + bedHint + goBtn;
 }
 
 async function init(){
