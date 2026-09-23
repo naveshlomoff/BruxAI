@@ -24,6 +24,16 @@
  * decimated) after removing each 91-sample packet's own mean, so ADC offset drift between packets
  * doesn't count as sound -- which the app turns into a level meter.
  *
+ * v4 (calibration): the relayed mic is plain subsampling -- aliased, so it can't answer "is this
+ * sound in the bruxism band?". The bridge now measures the spectrum itself at the full 8 kHz and
+ * sends 16 bands of 250 Hz every ~91 ms (see addPacketToFrame). Pages that ask for it (fmt 2 in their
+ * connect/keepalive) also get payload v2: samples as base64 uint16 (less than half the bytes of
+ * JSON numbers -- the WebSocket used to stall and drop about once a minute with all three sensors
+ * streaming), a flush sequence number so a lost flush shows up as a gap, and bridge timestamps: the
+ * accelerometer and pressure sensor arrive in 91-sample packets covering ~1-2 s each, so a sample's
+ * time comes from its packet's arrival, not from when the flush reached the phone. Older pages keep
+ * getting the v1 JSON arrays.
+ *
  * Data path (after a crash loop on real hardware): notifications arrive on the NimBLE host task
  * while flushing runs on the Arduino loop task, so buffers are fixed-size arrays behind a
  * spinlock, JSON is written straight into one pre-reserved String, and nothing network-related
@@ -55,10 +65,13 @@ const char* SUPABASE_KEY  = "sb_publishable_VTSRe2BT1ppguJKRhwQF3A_xr0rUtBt";
 const char* CHANNEL_TOPIC = "realtime:patch-live"; // supabase.channel('patch-live') in index.html
 const char* JOIN_REF      = "1";
 
+static const char* FIRMWARE_VERSION = "2026-09-23 bands"; // in every status; the Patch tab shows it
+
 static const unsigned long FLUSH_INTERVAL_MS        = 500;
 static const unsigned long STATUS_INTERVAL_MS       = 3000;
 static const unsigned long HEARTBEAT_INTERVAL_MS    = 25000; // Phoenix closes silent sockets
 static const unsigned long APP_KEEPALIVE_TIMEOUT_MS = 90000; // app sends keepalive every 15 s
+static const unsigned long V2_REQUEST_WINDOW_MS     = 60000; // payload v2 while a v2 page keeps asking
 
 static const char* PATCH_NAME_PREFIX = "BroxMon";
 static const char* PATCH_ADDR_PREFIX = "00:80:e1"; // ST's OUI -- see ScanCallbacks::onResult
@@ -67,10 +80,24 @@ static const char* PATCH_ADDR_PREFIX = "00:80:e1"; // ST's OUI -- see ScanCallba
 // deviation (what the app's per-second event detector uses) while cutting the upload 4x.
 static const uint32_t MIC_DECIMATION = 4;
 
-// Caps hold ~2 s of data each, so a slow or failed send can never grow memory without bound.
+// Caps hold ~2 s of mic and ~10 s of acc/fsm, so a slow or failed send can never grow memory
+// without bound.
 static const size_t MIC_CAP = 4000;
 static const size_t ACC_CAP = 1000;
 static const size_t FSM_CAP = 1000;
+
+// Sound bands. Each 91-sample mic packet is mean-removed, Hann-windowed, zero-padded to 128 and FFT'd
+// (62.5 Hz bins); its power is summed into BAND_COUNT bands of 250 Hz, and FRAME_PACKETS packets
+// (~91 ms of sound) make one frame. Packets are analysed one at a time because consecutive packets
+// aren't guaranteed contiguous: the patch drops a packet whenever a BLE send fails. 16 narrow bands
+// rather than the three analysis bands (<250 / 250-2000 / 2000-4000 Hz) so the edges can be retuned
+// from calibration recordings without reflashing.
+static const int    MIC_PACKET_SAMPLES = 91;  // the patch's packet size (mic_interface.h)
+static const int    FFT_SIZE           = 128;
+static const int    BAND_COUNT         = 16;  // 16 x 250 Hz = 0-4 kHz, the Nyquist range of 8 kHz
+static const int    FRAME_PACKETS      = 8;
+static const size_t FRAME_CAP          = 160; // ~14 s of frames: rides out a stalled send
+static const size_t PKT_TIME_CAP       = 12;  // acc/fsm packets held per flush (a cap of 1000 = 10)
 
 // Confirmed against BroxMon_Firmware/.../App/custom_stm.c.
 static const NimBLEUUID SERVICE_UUID("0000fe40-cc7a-482a-984a-7f2ed5b3e58f");
@@ -91,6 +118,7 @@ static String                  patchDeviceName = "";
 static bool          wantConnected  = false;
 static unsigned long lastAppContact = 0;
 static const char*   lastCommand    = "none"; // echoed in status so pages can tell who disconnected
+static unsigned long lastV2Request  = 0;      // last connect/keepalive from a page that reads v2
 
 // Wi-Fi setup portal state (see setupWiFi()); here because commands and status use it.
 static bool          portalActive    = false;
@@ -105,15 +133,31 @@ struct SampleBuf {
   size_t    cap;
   size_t    len;
   uint32_t  dropped;
+  uint32_t* times;    // acc/fsm: arrival millis() of each stored packet, one per 91 samples
+  size_t    timesLen;
 };
+
+// One ~91 ms slice of sound, sent to the app as raw bytes (payload v2 "bf").
+struct BandFrame {
+  uint32_t t;                // bridge millis() when the frame's last packet arrived
+  uint8_t  code[BAND_COUNT]; // band power in 0.5 dB steps, see encodeBandCode()
+};
+static_assert(sizeof(BandFrame) == 4 + BAND_COUNT, "BandFrame is sent as raw bytes");
 
 static uint16_t micStore[MIC_CAP], accStore[ACC_CAP], fsmStore[FSM_CAP];
 static uint16_t micOut[MIC_CAP],   accOut[ACC_CAP],   fsmOut[FSM_CAP];
-static SampleBuf bufMic = { micStore, MIC_CAP, 0, 0 };
-static SampleBuf bufAcc = { accStore, ACC_CAP, 0, 0 };
-static SampleBuf bufFsm = { fsmStore, FSM_CAP, 0, 0 };
+static uint32_t accTimes[PKT_TIME_CAP],    fsmTimes[PKT_TIME_CAP];
+static uint32_t accTimesOut[PKT_TIME_CAP], fsmTimesOut[PKT_TIME_CAP];
+static SampleBuf bufMic = { micStore, MIC_CAP, 0, 0, nullptr, 0 };
+static SampleBuf bufAcc = { accStore, ACC_CAP, 0, 0, accTimes, 0 };
+static SampleBuf bufFsm = { fsmStore, FSM_CAP, 0, 0, fsmTimes, 0 };
+static BandFrame frameStore[FRAME_CAP], frameOut[FRAME_CAP];
+static size_t    frameLen      = 0;
+static uint32_t  framesDropped = 0;
+static uint32_t  micPackets    = 0; // mic packets since the last flush (the patch makes ~88/s)
 static portMUX_TYPE bufMux = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t micDecimationCounter = 0;
+static uint32_t flushSeq = 0;       // payload v2 "q": a missing number = a flush that never arrived
 
 // Full-rate mic energy since the last flush (see the header note on micRms). Guarded by bufMux.
 static double   micEnergySum   = 0;
@@ -123,12 +167,101 @@ static float    lastMicRms     = 0; // for the serial log only
 
 // Raw notification counts per characteristic, logged every few seconds -- tells "the patch never
 // sends this channel" apart from "the bridge drops it" without any debugger on the patch.
-static volatile uint32_t notifAcc = 0, notifMic = 0, notifFsm = 0;
+static volatile uint32_t notifAcc = 0, notifMic = 0, notifFsm = 0, framesMade = 0;
 
 void sendStatus();
 
+// ── Sound bands: FFT state, used only on the NimBLE host task (the notification callback) ──
+static float   fftRe[FFT_SIZE], fftIm[FFT_SIZE];
+static float   twiddleCos[FFT_SIZE / 2], twiddleSin[FFT_SIZE / 2];
+static uint8_t bitReverse[FFT_SIZE];
+static float   hannWindow[MIC_PACKET_SAMPLES];
+static float   spectrumScale = 0;           // |X[k]|^2 -> that bin's share of the packet's variance
+static float   bandPower[BAND_COUNT];       // summed over the current frame's packets
+static int     framePackets  = 0;
+static volatile bool spectrumReset = false; // set on (re)connect: don't mix in a stale partial frame
+
+void setupSpectrum() {
+  float windowPower = 0;
+  for (int n = 0; n < MIC_PACKET_SAMPLES; n++) {
+    hannWindow[n] = 0.5f - 0.5f * cosf(2.0f * PI * n / (MIC_PACKET_SAMPLES - 1));
+    windowPower += hannWindow[n] * hannWindow[n];
+  }
+  // Parseval, corrected for the window: sum over all bins of |X[k]|^2 / (N_fft * sum(w^2)) is the
+  // packet's variance in counts^2 -- so bands add up to (about) micRms^2.
+  spectrumScale = 1.0f / (FFT_SIZE * windowPower);
+  for (int k = 0; k < FFT_SIZE / 2; k++) {
+    twiddleCos[k] = cosf(2.0f * PI * k / FFT_SIZE);
+    twiddleSin[k] = -sinf(2.0f * PI * k / FFT_SIZE);
+  }
+  for (int i = 0; i < FFT_SIZE; i++) {
+    int r = 0;
+    for (int b = 0; (1 << b) < FFT_SIZE; b++) if (i & (1 << b)) r |= (FFT_SIZE >> 1) >> b;
+    bitReverse[i] = r;
+  }
+}
+
+// In-place iterative radix-2 FFT of fftRe/fftIm.
+static void fft() {
+  for (int i = 0; i < FFT_SIZE; i++) {
+    int j = bitReverse[i];
+    if (j > i) { std::swap(fftRe[i], fftRe[j]); std::swap(fftIm[i], fftIm[j]); }
+  }
+  for (int len = 2; len <= FFT_SIZE; len <<= 1) {
+    int half = len >> 1, step = FFT_SIZE / len;
+    for (int start = 0; start < FFT_SIZE; start += len) {
+      for (int k = 0; k < half; k++) {
+        float wr = twiddleCos[k * step], wi = twiddleSin[k * step];
+        int a = start + k, b = a + half;
+        float xr = fftRe[b] * wr - fftIm[b] * wi;
+        float xi = fftRe[b] * wi + fftIm[b] * wr;
+        fftRe[b] = fftRe[a] - xr; fftIm[b] = fftIm[a] - xi;
+        fftRe[a] += xr;           fftIm[a] += xi;
+      }
+    }
+  }
+}
+
+// Band power (counts^2) -> 0.5 dB steps, 0 = 0.01 counts^2: code = 20*log10(power) + 40, so
+// power = 10^((code - 40) / 20). Measured: a quiet band ~40-60, a tap on the patch ~150.
+static uint8_t encodeBandCode(float power) {
+  if (power <= 0.01f) return 0;
+  float code = 20.0f * log10f(power) + 40.0f;
+  return code >= 254.5f ? 255 : (uint8_t)(code + 0.5f);
+}
+
+// Adds one mic packet to the current frame; returns true, with `frame` filled, when it completes one.
+static bool addPacketToFrame(const uint16_t* samples, size_t count, float mean, uint32_t now, BandFrame& frame) {
+  if (spectrumReset) {
+    spectrumReset = false;
+    framePackets = 0;
+    for (int b = 0; b < BAND_COUNT; b++) bandPower[b] = 0;
+  }
+  if (count != (size_t)MIC_PACKET_SAMPLES) return false; // the window is sized for the patch's packets
+  for (int n = 0; n < FFT_SIZE; n++) {
+    fftRe[n] = n < MIC_PACKET_SAMPLES ? (samples[n] - mean) * hannWindow[n] : 0.0f;
+    fftIm[n] = 0.0f;
+  }
+  fft();
+  const int binsPerBand = FFT_SIZE / 2 / BAND_COUNT;
+  for (int k = 1; k <= FFT_SIZE / 2; k++) { // bin 0 is the (removed) mean
+    float power = (fftRe[k] * fftRe[k] + fftIm[k] * fftIm[k]) * spectrumScale;
+    if (k < FFT_SIZE / 2) power *= 2.0f;    // one-sided: fold in the mirrored negative frequency
+    bandPower[std::min(k / binsPerBand, BAND_COUNT - 1)] += power;
+  }
+  if (++framePackets < FRAME_PACKETS) return false;
+  frame.t = now;
+  for (int b = 0; b < BAND_COUNT; b++) {
+    frame.code[b] = encodeBandCode(bandPower[b] / FRAME_PACKETS);
+    bandPower[b] = 0;
+  }
+  framePackets = 0;
+  return true;
+}
+
 // ── BLE notification handler (NimBLE host task): decode 182-byte / 91 x uint16-LE packets ──
 void notifyCallback(NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
+  uint32_t now = millis();
   SampleBuf* buf = nullptr;
   bool isMic = false;
   if (pChar->getUUID().equals(CHAR_ACC_UUID)) { buf = &bufAcc; notifAcc++; }
@@ -136,33 +269,53 @@ void notifyCallback(NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t le
   else if (pChar->getUUID().equals(CHAR_FSM_UUID)) { buf = &bufFsm; notifFsm++; }
   if (!buf) return;
 
-  size_t count = length / 2;
+  uint16_t samples[128];
+  size_t count = std::min(length / 2, sizeof(samples) / sizeof(samples[0]));
+  if (!count) return;
+  for (size_t i = 0; i < count; i++) samples[i] = (uint16_t)pData[i * 2] | ((uint16_t)pData[i * 2 + 1] << 8);
 
+  // Mic arithmetic happens before taking the lock: mean-removed energy/peak for micRms, and the
+  // packet's spectrum for the band frames.
   double packetEnergy = 0;
   uint16_t packetPeak = 0;
-  if (isMic && count) {
-    // Mean-remove per packet, then sum squares -- done before taking the lock (pure arithmetic).
+  BandFrame frame;
+  bool frameReady = false;
+  if (isMic) {
     uint32_t sum = 0;
-    for (size_t i = 0; i < count; i++) sum += (uint16_t)pData[i * 2] | ((uint16_t)pData[i * 2 + 1] << 8);
+    for (size_t i = 0; i < count; i++) sum += samples[i];
     float mean = (float)sum / count;
     for (size_t i = 0; i < count; i++) {
-      float dev = ((uint16_t)pData[i * 2] | ((uint16_t)pData[i * 2 + 1] << 8)) - mean;
+      float dev = samples[i] - mean;
       packetEnergy += dev * dev;
       uint16_t absDev = (uint16_t)(dev < 0 ? -dev : dev);
       if (absDev > packetPeak) packetPeak = absDev;
     }
+    frameReady = addPacketToFrame(samples, count, mean, now, frame);
+    if (frameReady) framesMade++;
   }
 
   portENTER_CRITICAL(&bufMux);
-  if (isMic && count) {
+  if (isMic) {
     micEnergySum += packetEnergy;
     micEnergyCount += count;
     if (packetPeak > micPeakDev) micPeakDev = packetPeak;
-  }
-  for (size_t i = 0; i < count; i++) {
-    if (isMic && (micDecimationCounter++ % MIC_DECIMATION) != 0) continue;
-    if (buf->len >= buf->cap) { buf->dropped++; continue; }
-    buf->data[buf->len++] = (uint16_t)pData[i * 2] | ((uint16_t)pData[i * 2 + 1] << 8);
+    micPackets++;
+    for (size_t i = 0; i < count; i++) {
+      if ((micDecimationCounter++ % MIC_DECIMATION) != 0) continue;
+      if (buf->len >= buf->cap) { buf->dropped++; continue; }
+      buf->data[buf->len++] = samples[i];
+    }
+    if (frameReady) {
+      if (frameLen < FRAME_CAP) frameStore[frameLen++] = frame;
+      else framesDropped++;
+    }
+  } else if (buf->len + count <= buf->cap && buf->timesLen < PKT_TIME_CAP) {
+    // Whole packets only, so every 91 samples line up with one arrival time.
+    memcpy(buf->data + buf->len, samples, count * sizeof(uint16_t));
+    buf->len += count;
+    buf->times[buf->timesLen++] = now;
+  } else {
+    buf->dropped += count;
   }
   portEXIT_CRITICAL(&bufMux);
 }
@@ -264,6 +417,9 @@ void sendStatus() {
   s += lastCommand;
   s += "\",\"wifiSetupOpen\":";
   s += portalActive ? "true" : "false";
+  s += ",\"fw\":\"";
+  s += FIRMWARE_VERSION;
+  s += "\"";
   if (patchConnected) {
     s += ",\"deviceName\":\"";
     s += patchDeviceName;
@@ -273,7 +429,15 @@ void sendStatus() {
   broadcastFinish(s);
 }
 
-void handleCommand(const char* action) {
+// fmt: the sample payload version the sending page reads (absent = 1, pages from before v2).
+bool appWantsV2() {
+  return lastV2Request && millis() - lastV2Request < V2_REQUEST_WINDOW_MS;
+}
+
+void handleCommand(const char* action, int fmt) {
+  // v2 wins while any v2 page keeps asking, so an old page left open elsewhere can't flip the
+  // format back and forth every keepalive.
+  if (fmt >= 2 && (strcmp(action, "connect") == 0 || strcmp(action, "keepalive") == 0)) lastV2Request = millis();
   if (strcmp(action, "connect") == 0) {
     lastAppContact = millis();
     lastCommand = "connect";
@@ -308,6 +472,7 @@ void handleWsText(const uint8_t* payload, size_t length) {
   filter["payload"]["status"] = true;
   filter["payload"]["event"] = true;
   filter["payload"]["payload"]["action"] = true;
+  filter["payload"]["payload"]["fmt"] = true;
 
   JsonDocument doc;
   if (deserializeJson(doc, (const char*)payload, length, DeserializationOption::Filter(filter))) return;
@@ -322,7 +487,7 @@ void handleWsText(const uint8_t* payload, size_t length) {
     return;
   }
   if (strcmp(event, "broadcast") == 0 && strcmp(doc["payload"]["event"] | "", "command") == 0) {
-    handleCommand(doc["payload"]["payload"]["action"] | "");
+    handleCommand(doc["payload"]["payload"]["action"] | "", doc["payload"]["payload"]["fmt"] | 1);
   }
 }
 
@@ -363,10 +528,52 @@ static void appendArray(String& s, const char* key, const uint16_t* v, size_t n)
   s += ']';
 }
 
+static const char BASE64_CHARS[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static void appendBase64(String& s, const uint8_t* data, size_t len) {
+  char chunk[192];
+  size_t used = 0;
+  for (size_t i = 0; i < len; i += 3) {
+    uint32_t v = (uint32_t)data[i] << 16;
+    if (i + 1 < len) v |= (uint32_t)data[i + 1] << 8;
+    if (i + 2 < len) v |= data[i + 2];
+    chunk[used++] = BASE64_CHARS[(v >> 18) & 63];
+    chunk[used++] = BASE64_CHARS[(v >> 12) & 63];
+    chunk[used++] = i + 1 < len ? BASE64_CHARS[(v >> 6) & 63] : '=';
+    chunk[used++] = i + 2 < len ? BASE64_CHARS[v & 63] : '=';
+    if (used > sizeof(chunk) - 4) { s.concat(chunk, used); used = 0; }
+  }
+  if (used) s.concat(chunk, used);
+}
+
+// ,"key":"<base64>" -- the ESP32 is little-endian, so uint16/uint32 arrays go out as LE bytes.
+static void appendBase64Field(String& s, const char* key, const void* data, size_t bytes) {
+  s += ",\"";
+  s += key;
+  s += "\":\"";
+  appendBase64(s, (const uint8_t*)data, bytes);
+  s += '"';
+}
+
+static void appendTimes(String& s, const char* key, const uint32_t* t, size_t n) {
+  s += ",\"";
+  s += key;
+  s += "\":[";
+  for (size_t i = 0; i < n; i++) {
+    if (i) s += ',';
+    s += t[i];
+  }
+  s += ']';
+}
+
+// Payload v2: {"v":2, "q": flush sequence, "t": bridge millis() at this flush, "mp": mic packets
+// received since the last flush, "d": samples dropped on the bridge (only when nonzero),
+// "mic"/"acc"/"fsm": base64 uint16 LE, "at"/"ft": arrival millis() of each 91-sample acc/fsm packet,
+// "bf": base64 band frames (20 bytes each: uint32 LE millis + BAND_COUNT codes), micRms, micPeak}.
 void flushBuffers() {
   // Take the samples under the lock (a memcpy -- microseconds), then do all slow work outside it.
-  size_t micN, accN, fsmN;
-  uint32_t dropped;
+  size_t micN, accN, fsmN, accTN, fsmTN, frameN;
+  uint32_t dropped, framesLost, packets;
   double energy;
   uint32_t energyCount;
   uint16_t peak;
@@ -375,23 +582,56 @@ void flushBuffers() {
   memcpy(micOut, micStore, micN * sizeof(uint16_t));
   memcpy(accOut, accStore, accN * sizeof(uint16_t));
   memcpy(fsmOut, fsmStore, fsmN * sizeof(uint16_t));
+  accTN = bufAcc.timesLen; fsmTN = bufFsm.timesLen;
+  memcpy(accTimesOut, accTimes, accTN * sizeof(uint32_t));
+  memcpy(fsmTimesOut, fsmTimes, fsmTN * sizeof(uint32_t));
+  frameN = frameLen;
+  memcpy(frameOut, frameStore, frameN * sizeof(BandFrame));
   bufMic.len = bufAcc.len = bufFsm.len = 0;
+  bufAcc.timesLen = bufFsm.timesLen = 0;
+  frameLen = 0;
   dropped = bufMic.dropped + bufAcc.dropped + bufFsm.dropped;
   bufMic.dropped = bufAcc.dropped = bufFsm.dropped = 0;
+  framesLost = framesDropped; framesDropped = 0;
+  packets = micPackets; micPackets = 0;
   energy = micEnergySum; energyCount = micEnergyCount; peak = micPeakDev;
   micEnergySum = 0; micEnergyCount = 0; micPeakDev = 0;
   portEXIT_CRITICAL(&bufMux);
 
   if (dropped) Serial.printf("[BLE] %u samples dropped (buffer full)\n", dropped);
+  if (framesLost) Serial.printf("[BLE] %u band frames dropped (buffer full)\n", framesLost);
   if (!micN && !accN && !fsmN) return;
+  flushSeq++; // counted even if the send fails below, so the app sees the gap
 
-  String s = broadcastStart("sample", (micN + accN + fsmN) * 6 + 64);
-  s += '{';
-  appendArray(s, "mic", micOut, micN);
-  s += ',';
-  appendArray(s, "acc", accOut, accN);
-  s += ',';
-  appendArray(s, "fsm", fsmOut, fsmN);
+  String s;
+  if (appWantsV2()) {
+    size_t bytes = (micN + accN + fsmN) * 2 + frameN * sizeof(BandFrame);
+    s = broadcastStart("sample", bytes * 4 / 3 + (accTN + fsmTN) * 11 + 160);
+    s += "{\"v\":2,\"q\":";
+    s += flushSeq;
+    s += ",\"t\":";
+    s += (uint32_t)millis();
+    s += ",\"mp\":";
+    s += packets;
+    if (dropped) {
+      s += ",\"d\":";
+      s += dropped;
+    }
+    appendBase64Field(s, "mic", micOut, micN * sizeof(uint16_t));
+    appendBase64Field(s, "acc", accOut, accN * sizeof(uint16_t));
+    appendBase64Field(s, "fsm", fsmOut, fsmN * sizeof(uint16_t));
+    appendTimes(s, "at", accTimesOut, accTN);
+    appendTimes(s, "ft", fsmTimesOut, fsmTN);
+    appendBase64Field(s, "bf", frameOut, frameN * sizeof(BandFrame));
+  } else {
+    s = broadcastStart("sample", (micN + accN + fsmN) * 6 + 64);
+    s += '{';
+    appendArray(s, "mic", micOut, micN);
+    s += ',';
+    appendArray(s, "acc", accOut, accN);
+    s += ',';
+    appendArray(s, "fsm", fsmOut, fsmN);
+  }
   if (energyCount) {
     lastMicRms = sqrt(energy / energyCount);
     char level[48];
@@ -446,6 +686,7 @@ bool connectToPatch() {
     return false;
   }
 
+  spectrumReset = true;
   patchConnected = true;
   Serial.printf("[BLE] connected + subscribed (free heap %u)\n", ESP.getFreeHeap());
   sendStatus();
@@ -501,6 +742,7 @@ static KnownNetwork  knownNetworks[MAX_KNOWN_NETWORKS];
 static int           knownCount     = 0;
 
 static WiFiManager   wm;
+static volatile uint32_t staDisconnects = 0;  // counted by the event handler in setupWiFi()
 static bool          portalOnDemand = false; // opened to add a network while already online
 static unsigned long portalOpenedAt = 0;
 static volatile bool portalSaved    = false; // set by WiFiManager's save callback
@@ -575,8 +817,24 @@ bool connectKnownNetwork() {
     const KnownNetwork& net = knownNetworks[order[c]];
     Serial.printf("[WiFi] trying '%s' (rssi %d)\n", net.ssid.c_str(), rssi[c]);
     WiFi.begin(net.ssid.c_str(), net.pass.c_str());
-    unsigned long start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 12000) delay(100);
+    unsigned long start = millis(), lastBegin = start;
+    uint32_t seenDisconnects = staDisconnects;
+    int begins = 1;
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 12000) {
+      delay(100);
+      // The home router refuses the first association after a reboot ("Association refused too
+      // many times", reason 208) and the driver then stops trying -- ask again instead of sitting
+      // out the window and falling back to the setup portal (seen: ~25 s to get online).
+      if (staDisconnects != seenDisconnects && begins < 3 && millis() - lastBegin > 1500) {
+        Serial.println("[WiFi] refused -- asking again");
+        WiFi.disconnect();
+        delay(200);
+        seenDisconnects = staDisconnects;
+        WiFi.begin(net.ssid.c_str(), net.pass.c_str());
+        lastBegin = millis();
+        begins++;
+      }
+    }
     if (WiFi.status() == WL_CONNECTED) {
       Serial.printf("[WiFi] connected to '%s', IP = %s\n", net.ssid.c_str(), WiFi.localIP().toString().c_str());
       return true;
@@ -656,6 +914,7 @@ void setupWiFi() {
   // The driver only reports "failed"; log why, so a bad password (15 / 204 handshake timeout,
   // 202 auth fail) can be told apart from a missing network (201).
   WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+    staDisconnects++;
     Serial.printf("[WiFi] link down, reason %u\n", info.wifi_sta_disconnected.reason);
   }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
 
@@ -684,8 +943,9 @@ void setupWiFi() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\n=== BroxMon Bridge (connect on demand) starting ===");
+  Serial.printf("\n=== BroxMon Bridge (connect on demand, fw %s) starting ===\n", FIRMWARE_VERSION);
 
+  setupSpectrum();
   setupWiFi();
 
   // No fingerprint/CA -> the library calls setInsecure(): avoids a brittle pinned root CA that
@@ -746,9 +1006,9 @@ void loop() {
   static unsigned long lastNotifLog = 0;
   if (patchConnected && millis() - lastNotifLog >= 5000) {
     lastNotifLog = millis();
-    Serial.printf("[BLE] notifications last 5s: acc=%u mic=%u fsm=%u micRms=%.1f (free heap %u)\n",
-                  notifAcc, notifMic, notifFsm, lastMicRms, ESP.getFreeHeap());
-    notifAcc = notifMic = notifFsm = 0;
+    Serial.printf("[BLE] notifications last 5s: acc=%u mic=%u fsm=%u frames=%u micRms=%.1f payload v%d (free heap %u)\n",
+                  notifAcc, notifMic, notifFsm, framesMade, lastMicRms, appWantsV2() ? 2 : 1, ESP.getFreeHeap());
+    notifAcc = notifMic = notifFsm = framesMade = 0;
   }
 
   delay(5);

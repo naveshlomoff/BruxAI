@@ -160,6 +160,54 @@ html, body {
 .patch-wifi-btn:disabled { color: var(--text3); opacity: .6; cursor: default; }
 .patch-version { text-align: center; font-family: var(--mono); font-size: 8px; color: var(--text3); opacity: .6; letter-spacing: .06em; margin-top: 18px; }
 
+/* ── PATCH CALIBRATION (card in the Patch tab + full-screen guided step) ── */
+.patch-calib-intro, .patch-calib-row .name, .patch-calib-overlay { font-family: system-ui, -apple-system, 'Segoe UI', Arial, sans-serif; }
+.patch-calib-intro { font-size: 13px; line-height: 1.5; color: var(--text2); margin-bottom: 10px; }
+.patch-calib-progress { height: 6px; border-radius: 3px; background: var(--bg3); overflow: hidden; margin-bottom: 12px; }
+.patch-calib-progress > div { height: 100%; width: 0%; background: var(--green); transition: width .3s; }
+.patch-calib-btn { width: 100%; font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; padding: 13px 16px; border-radius: 999px; background: var(--text); border: 1px solid var(--text); color: #fff; cursor: pointer; }
+.patch-calib-btn:disabled { background: var(--bg3); border-color: var(--border2); color: var(--text3); cursor: default; }
+.patch-calib-btn.secondary { background: var(--bg); color: var(--text); border-color: var(--border2); }
+.patch-calib-list { margin-top: 12px; }
+.patch-calib-group { font-family: var(--mono); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; color: var(--text3); margin: 10px 0 2px; }
+.patch-calib-row { display: flex; align-items: center; gap: 10px; padding: 9px 2px; border-bottom: 0.5px solid var(--border); cursor: pointer; font-size: 13px; color: var(--text); }
+.patch-calib-row:last-child { border-bottom: none; }
+.patch-calib-row .num { font-family: var(--mono); font-size: 10px; color: var(--text3); width: 18px; text-align: center; flex-shrink: 0; }
+.patch-calib-row .name { flex: 1; }
+.patch-calib-row .mark { font-size: 13px; width: 18px; text-align: center; flex-shrink: 0; }
+.patch-calib-row.ok .mark { color: var(--green); }
+.patch-calib-row.bad .mark { color: var(--amber); }
+.patch-calib-reset { display: block; margin: 10px auto 0; background: none; border: none; font-family: var(--mono); font-size: 9px; letter-spacing: .06em; text-transform: uppercase; color: var(--text3); cursor: pointer; padding: 6px 10px; }
+
+.patch-calib-overlay { position: fixed; inset: 0; z-index: 1600; display: none; flex-direction: column; background: var(--bg); color: var(--text); padding: max(14px, env(safe-area-inset-top)) 18px max(14px, env(safe-area-inset-bottom)); }
+.patch-calib-overlay.show { display: flex; }
+.patch-calib-overlay[data-tone="do"] { background: var(--red); color: #fff; }
+.patch-calib-overlay[data-tone="calm"] { background: #eef2ff; }
+.patch-calib-overlay[data-tone="rest"] { background: var(--greenlt); }
+.patch-calib-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.patch-calib-stepno { font-family: var(--mono); font-size: 10px; letter-spacing: .08em; opacity: .7; }
+.patch-calib-title { font-size: 20px; font-weight: 700; margin-top: 2px; }
+.patch-calib-close { background: none; border: none; font-size: 26px; line-height: 1; color: inherit; opacity: .7; cursor: pointer; padding: 0 4px; }
+.patch-calib-body { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; gap: 10px; overflow-y: auto; }
+.patch-calib-text { font-size: 17px; line-height: 1.55; max-width: 420px; }
+.patch-calib-hint { font-size: 13px; line-height: 1.5; opacity: .75; max-width: 420px; }
+.patch-calib-read { font-size: 17px; line-height: 1.7; max-width: 440px; background: rgba(255,255,255,.7); border-radius: var(--r); padding: 12px 14px; color: var(--text); }
+.patch-calib-phase { font-size: 40px; font-weight: 800; line-height: 1.15; }
+.patch-calib-count { font-family: var(--mono); font-size: 72px; font-weight: 600; line-height: 1; }
+.patch-calib-rep { font-size: 15px; opacity: .8; }
+.patch-calib-result { font-size: 15px; line-height: 1.55; max-width: 420px; }
+.patch-calib-result .big { font-size: 26px; font-weight: 800; margin-bottom: 6px; }
+.patch-calib-result .why { font-size: 14px; color: var(--amber); }
+.patch-calib-result .nums { font-family: var(--mono); font-size: 11px; color: var(--text2); margin-top: 8px; direction: ltr; }
+.patch-calib-foot { display: flex; flex-direction: column; gap: 10px; }
+.patch-calib-steps { height: 5px; border-radius: 3px; background: rgba(0,0,0,.08); overflow: hidden; }
+.patch-calib-steps > div { height: 100%; width: 0%; background: currentColor; opacity: .55; }
+.patch-calib-sensors { display: flex; justify-content: center; gap: 14px; font-family: var(--mono); font-size: 10px; letter-spacing: .05em; direction: ltr; opacity: .85; }
+.patch-calib-sensors span::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #9ca3af; margin-right: 5px; vertical-align: 0; }
+.patch-calib-sensors span.live::before { background: #22c55e; }
+.patch-calib-actions { display: flex; flex-direction: column; gap: 8px; }
+.patch-calib-overlay .patch-calib-btn { font-family: inherit; font-size: 14px; text-transform: none; letter-spacing: .02em; }
+
 /* ── STATS GRID ── */
 .stats-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 8px; }
 .stat-card { background: var(--bg2); border-radius: var(--r); padding: 10px 6px; text-align: center; border: 0.5px solid var(--border); }
@@ -680,13 +728,22 @@ document.addEventListener('touchstart', function iosUnlock() {
         <div id="patch-download-row" style="display:none;gap:8px;margin-top:10px"></div>
       </div>
 
+      <div class="card">
+        <div class="label" style="margin-bottom:8px">Calibration · כיול</div>
+        <div class="patch-calib-intro" dir="rtl">צעדים קצרים, כ-20 דקות בסך הכול. כל צעד מקליט את עצמו: עוקבים אחרי המסך והצפצופים. צפצוף כפול = להתחיל, צפצוף בודד = לשחרר.</div>
+        <div class="patch-calib-progress"><div id="patch-calib-bar"></div></div>
+        <button id="patch-calib-next" class="patch-calib-btn" onclick="patchCalibOpenNext()" disabled>Connect the patch first</button>
+        <div id="patch-calib-list" class="patch-calib-list" dir="rtl"></div>
+        <button class="patch-calib-reset" onclick="patchCalibReset()">Start a new calibration round</button>
+      </div>
+
       <div class="label" style="margin-top:4px">Past sessions</div>
       <div id="patch-sessions-list">
         <div class="empty"><div class="empty-icon">◎</div><div class="empty-text">No patch sessions yet.</div></div>
       </div>
 
       <button id="patch-wifi-btn" class="patch-wifi-btn" onclick="patchOpenWifiSetup()" disabled>+ Add Wi-Fi network</button>
-      <div class="patch-version">Patch UI · 2026-09-16 multi-wifi</div>
+      <div class="patch-version">Patch UI · 2026-09-23 calibration<span id="patch-bridge-fw"></span></div>
 
     </div></div>
   </div>
@@ -733,6 +790,23 @@ document.addEventListener('touchstart', function iosUnlock() {
     <div id="patch-report-events"></div>
     <div class="label" style="margin-top:12px">Download raw data</div>
     <div id="patch-report-downloads" style="display:flex;gap:8px"></div>
+  </div>
+</div>
+
+<!-- ═══ PATCH CALIBRATION STEP (full screen: instructions → cued recording → result) ═══ -->
+<div id="patch-calib-overlay" class="patch-calib-overlay" dir="rtl">
+  <div class="patch-calib-top">
+    <div>
+      <div class="patch-calib-stepno" id="patch-calib-stepno">—</div>
+      <div class="patch-calib-title" id="patch-calib-title">—</div>
+    </div>
+    <button class="patch-calib-close" onclick="patchCalibClose()" aria-label="close">×</button>
+  </div>
+  <div class="patch-calib-body" id="patch-calib-body"></div>
+  <div class="patch-calib-foot">
+    <div class="patch-calib-steps"><div id="patch-calib-stepbar"></div></div>
+    <div class="patch-calib-sensors" id="patch-calib-sensors"><span data-ch="mic">mic</span><span data-ch="acc">motion</span><span data-ch="fsm">pressure</span></div>
+    <div class="patch-calib-actions" id="patch-calib-actions"></div>
   </div>
 </div>
 
@@ -2356,7 +2430,74 @@ const patchState = {
   csvRows:  { mic: [], acc: [], fsm: [] },
   buckets:  { mic: {}, acc: {}, fsm: {} },  // epochSecond -> {n,sum,sumSq,min,max}, recording-only, feeds the event detector
   sessionStart: null,     // Date.now() when the current recording started; null when idle
+  sessionMeta: null,      // {kind:'calibration', label, cues} while a calibration step records; null otherwise
+  timing: null,           // recording-only: flush/packet/band-frame timing from payload v2 (see patchNoteFlush)
+  bridgeFw: null,         // bridge firmware version from its status (absent before 2026-09-23)
+  lastData: { mic: 0, acc: 0, fsm: 0 }, // Date.now() of each sensor's latest samples, for the live dots
+  liveFsm: null,          // latest pressure sample, shown during calibration
 };
+
+// ── Payload v2 (bridge firmware "2026-09-23 bands", see flushBuffers in BroxMonBridge.ino) ──
+// Pages that send fmt 2 get samples as base64 uint16, a flush sequence number, bridge-clock
+// timestamps, and the mic spectrum in 16 bands of 250 Hz computed on the bridge at the full 8 kHz.
+const PATCH_PAYLOAD_FMT = 2;
+const PATCH_BAND_COUNT = 16;   // 16 x 250 Hz = 0-4 kHz
+const PATCH_BAND_HZ = 250;
+const PATCH_FRAME_BYTES = 4 + PATCH_BAND_COUNT;
+const PATCH_PACKET_SAMPLES = 91; // every acc/fsm packet from the patch
+
+function patchB64Bytes(b64) {
+  const bin = atob(b64 || '');
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+function patchB64U16(b64) {
+  const b = patchB64Bytes(b64);
+  const out = new Array(b.length >> 1);
+  for (let i = 0; i < out.length; i++) out[i] = b[2 * i] | (b[2 * i + 1] << 8);
+  return out;
+}
+
+// Band code -> power in ADC counts^2 (0.5 dB steps, see encodeBandCode in the .ino).
+function patchBandPower(code) {
+  return Math.pow(10, (code - 40) / 20);
+}
+
+function patchNewTiming() {
+  return {
+    flushes: [],  // [ms since session start when received, q, bridge ms, micN, accN, fsmN, mic packets]
+    accT: [],     // bridge ms each 91-sample acc packet arrived at the bridge
+    fsmT: [],     // same for fsm
+    bandT: [],    // bridge ms per band frame (~91 ms of sound each)
+    bandV: [],    // PATCH_BAND_COUNT codes per frame, flattened
+    bandCount: PATCH_BAND_COUNT,
+    bandHz: PATCH_BAND_HZ,
+    gaps: 0,      // flushes that never arrived (sequence numbers skipped)
+    restarts: 0,  // the bridge rebooted mid-recording (sequence went backwards)
+    lastQ: null,
+  };
+}
+
+// Keeps what a v2 flush says about time, so every sample of a recording can be placed on one clock.
+function patchNoteFlush(p, counts) {
+  const t = patchState.timing;
+  if (!patchState.recording || !t) return;
+  if (t.lastQ !== null) {
+    if (p.q > t.lastQ + 1) t.gaps += p.q - t.lastQ - 1;
+    else if (p.q <= t.lastQ) t.restarts++;
+  }
+  t.lastQ = p.q;
+  t.flushes.push([Date.now() - patchState.sessionStart, p.q, p.t, counts.mic, counts.acc, counts.fsm, p.mp || 0]);
+  for (const ms of p.at || []) t.accT.push(ms);
+  for (const ms of p.ft || []) t.fsmT.push(ms);
+  const bf = patchB64Bytes(p.bf);
+  for (let off = 0; off + PATCH_FRAME_BYTES <= bf.length; off += PATCH_FRAME_BYTES) {
+    t.bandT.push((bf[off] | (bf[off + 1] << 8) | (bf[off + 2] << 16) | (bf[off + 3] << 24)) >>> 0);
+    for (let b = 0; b < PATCH_BAND_COUNT; b++) t.bandV.push(bf[off + 4 + b]);
+  }
+}
 
 function patchPushSamples(channel, values) {
   const buf = patchState.buffers[channel];
@@ -2403,7 +2544,7 @@ let patchKeepaliveTimer = null;
 
 function patchSendCommand(action) {
   if (!patchChannel) return;
-  patchChannel.send({ type: 'broadcast', event: 'command', payload: { action } });
+  patchChannel.send({ type: 'broadcast', event: 'command', payload: { action, fmt: PATCH_PAYLOAD_FMT } });
   if (action === 'connect') patchConnectSentAt = Date.now();
 }
 
@@ -2473,6 +2614,11 @@ function patchApplyOffline() {
 }
 
 function patchOnBroadcastSample(payload) {
+  let v2 = null;
+  if (payload.v === 2) {
+    v2 = payload;
+    payload = { mic: patchB64U16(v2.mic), acc: patchB64U16(v2.acc), fsm: patchB64U16(v2.fsm), micRms: v2.micRms, micPeak: v2.micPeak };
+  }
   patchApplyBridgeState('connected');
   if (typeof payload.micRms === 'number') {
     patchUpdateMicLevel(payload.micRms);
@@ -2488,7 +2634,12 @@ function patchOnBroadcastSample(payload) {
     patchDrawChart(channel);
     const countEl = document.getElementById('patch-count-' + channel);
     if (countEl) countEl.textContent = patchState.buffers[channel].length + ' samples';
+    patchState.lastData[channel] = Date.now();
   }
+  if (payload.fsm && payload.fsm.length) patchState.liveFsm = payload.fsm[payload.fsm.length - 1];
+  if (v2) patchNoteFlush(v2, { mic: payload.mic.length, acc: payload.acc.length, fsm: payload.fsm.length });
+  // A v1 flush has no packet times, so this recording's samples no longer line up with them.
+  else if (patchState.recording && patchState.timing) patchState.timing.v1Flushes = (patchState.timing.v1Flushes || 0) + 1;
   const pktEl = document.getElementById('patch-stat-packets');
   if (pktEl) pktEl.textContent = patchState.sampleCount;
 }
@@ -2497,6 +2648,12 @@ function patchOnBroadcastStatus(payload) {
   // Bridges from before connect-on-demand only sent patchConnected.
   const state = payload.state || (payload.patchConnected ? 'connected' : 'idle');
   patchState.wifiSetupOpen = !!payload.wifiSetupOpen;
+  if (payload.fw && payload.fw !== patchState.bridgeFw) {
+    patchState.bridgeFw = payload.fw;
+    const fwEl = document.getElementById('patch-bridge-fw');
+    if (fwEl) fwEl.textContent = ' · bridge ' + payload.fw;
+    patchCalibRenderCard();
+  }
   patchApplyBridgeState(state, payload.deviceName);
 }
 
@@ -2605,29 +2762,60 @@ function patchSetStatus(connState) {
     pill.className = cls;
     pill.innerHTML = '<span class="pulse"></span>' + label;
   }
-  if (recBtn) recBtn.disabled = connState !== 'connected';
+  patchRenderRecordButton();
   patchRenderConnectButton();
+  patchCalibRenderCard();
+  if (connState !== 'connected') patchCalibOnDisconnect();
+  if (patchCalib && patchCalib.stage === 'intro') patchCalibRenderIntro(); // its button follows the connection
+}
+
+// Stop stays available while recording even if the bridge drops, so a session can always be ended.
+function patchRenderRecordButton() {
+  const btn = document.getElementById('patch-record-btn');
+  if (!btn) return;
+  const calibrating = !!patchState.sessionMeta;
+  btn.textContent = calibrating ? 'Calibration step recording…' : patchState.recording ? 'Stop recording' : 'Start recording';
+  btn.classList.toggle('is-recording', patchState.recording && !calibrating);
+  btn.disabled = calibrating || (!patchState.recording && patchState.connState !== 'connected');
+  patchCalibRenderCard(); // its button depends on whether a recording is running
+}
+
+// meta: null for a normal recording, {kind:'calibration', label, cues} for a calibration step.
+function patchStartRecording(meta) {
+  if (patchState.recording) return false;
+  patchState.recording = true;
+  patchState.csvRows = { mic: [], acc: [], fsm: [] };
+  patchState.buckets = { mic: {}, acc: {}, fsm: {} };
+  patchState.micLevelRows = [];
+  patchState.timing = patchNewTiming();
+  patchState.sessionMeta = meta || null;
+  patchState.sessionStart = Date.now();
+  const recStat = document.getElementById('patch-stat-rec');
+  if (recStat) recStat.textContent = 'on';
+  const row = document.getElementById('patch-download-row');
+  if (row) row.style.display = 'none';
+  patchRenderRecordButton();
+  return true;
+}
+
+// Resolves to the saved session (null if nothing was recording).
+async function patchStopRecording() {
+  if (!patchState.recording) return null;
+  patchState.recording = false;
+  const calibrating = !!patchState.sessionMeta;
+  const recStat = document.getElementById('patch-stat-rec');
+  if (recStat) recStat.textContent = 'off';
+  if (!calibrating) patchOfferDownloads();
+  const session = await patchFinishSession();
+  patchState.sessionMeta = null;
+  patchRenderRecordButton();
+  return session;
 }
 
 function patchToggleRecording() {
-  patchState.recording = !patchState.recording;
-  const btn = document.getElementById('patch-record-btn');
-  const recStat = document.getElementById('patch-stat-rec');
-  if (patchState.recording) {
-    patchState.csvRows = { mic: [], acc: [], fsm: [] };
-    patchState.buckets = { mic: {}, acc: {}, fsm: {} };
-    patchState.micLevelRows = [];
-    patchState.sessionStart = Date.now();
-    if (btn) { btn.textContent = 'Stop recording'; btn.classList.add('is-recording'); }
-    if (recStat) recStat.textContent = 'on';
-    const row = document.getElementById('patch-download-row');
-    if (row) row.style.display = 'none';
-  } else {
-    if (btn) { btn.textContent = 'Start recording'; btn.classList.remove('is-recording'); }
-    if (recStat) recStat.textContent = 'off';
-    patchOfferDownloads();
-    patchFinishSession();
-  }
+  if (patchState.sessionMeta) return; // a calibration step owns the recorder
+  if (patchState.recording) patchStopRecording();
+  else patchStartRecording(null);
 }
 
 // container: a <div> to fill with 3 download buttons. rowsByChannel: optional {mic,acc,fsm}
@@ -2789,13 +2977,15 @@ function patchDbGetAll() {
   }));
 }
 
-// Runs once when a recording stops (called from patchToggleRecording): detects events over the
+// Runs once when a recording stops (called from patchStopRecording): detects events over the
 // just-finished session's buckets, persists the session (events + a raw-sample snapshot, so
-// history entries can still be re-downloaded as CSV later), then opens the report window.
+// history entries can still be re-downloaded as CSV later), then opens the report window -- except
+// for a calibration step, whose own screen shows the result. Resolves to the session.
 async function patchFinishSession() {
   const sessionStart = patchState.sessionStart;
   const sessionEnd = Date.now();
-  if (!sessionStart) return; // nothing was actually recording (e.g. disconnect guard fired with no session open)
+  if (!sessionStart) return null; // nothing was actually recording (e.g. disconnect guard fired with no session open)
+  const meta = patchState.sessionMeta;
   const events = patchRunDetection();
   const session = {
     sessionId: sessionStart,
@@ -2810,11 +3000,23 @@ async function patchFinishSession() {
     micLevel: (patchState.micLevelRows || []).slice(),
     deviceName: patchDeviceNameForSession(),
   };
+  const timing = patchState.timing;
+  if (timing && timing.flushes.length) {
+    const { lastQ, ...kept } = timing;
+    session.timing = kept;
+  }
+  if (meta) {
+    session.kind = meta.kind;
+    session.label = meta.label;
+    session.cues = meta.cues.slice();
+  }
+  patchState.timing = null;
   try { await patchDbPut(session); } catch (e) { console.warn('[patch] session save failed', e); }
   patchState.sessionStart = null;
-  patchShowReport(session);
+  if (!meta) patchShowReport(session);
   patchRenderSessionHistory();
-  patchSaveSessionToCloud(session); // after the local save, so a failed upload never loses the session
+  if (!meta) patchSaveSessionToCloud(session); // after the local save, so a failed upload never loses the session
+  return session;
 }
 
 function patchDeviceNameForSession() {
@@ -2833,7 +3035,7 @@ async function patchUploadSession(session) {
   const raw = session.raw || { mic: [], acc: [], fsm: [] };
   const events = session.events || [];
   const file = JSON.stringify({
-    format: 'broxmon-patch-session-v1',
+    format: session.timing ? 'broxmon-patch-session-v2' : 'broxmon-patch-session-v1',
     sessionId: session.sessionId,
     startTime: session.startTime,
     endTime: session.endTime,
@@ -2844,6 +3046,13 @@ async function patchUploadSession(session) {
     fsm: raw.fsm,
     micLevel: session.micLevel || [], // [[ms since session start, full-rate rms], ...]
     events,
+    // v2 only: flush/packet/band-frame timing on the bridge clock (see patchNewTiming), and for a
+    // calibration step its label, cue timeline and on-phone result.
+    timing: session.timing || null,
+    kind: session.kind || 'recording',
+    label: session.label || null,
+    cues: session.cues || null,
+    calibration: session.calib || null,
   });
 
   let blob = new Blob([file], { type: 'application/json' });
@@ -2868,28 +3077,33 @@ async function patchUploadSession(session) {
     event_count: events.length,
     events,
     mic_level: session.micLevel || [],
-    sample_counts: { mic: raw.mic.length, acc: raw.acc.length, fsm: raw.fsm.length },
+    // A calibration step names itself here too, so it can be told apart in the Table Editor.
+    sample_counts: { mic: raw.mic.length, acc: raw.acc.length, fsm: raw.fsm.length, ...(session.label ? { calibration: session.label } : {}) },
     raw_path: path,
   }, { onConflict: 'user_id,session_id' });
   if (rowErr) throw rowErr;
   return path;
 }
 
+// Resolves to true once the session is in the cloud.
 async function patchSaveSessionToCloud(session, quiet) {
   if (!supabase || !state.user) {
     if (!quiet) toast('Patch session saved on this device — cloud upload will retry later', 4000);
-    return;
+    return false;
   }
+  let saved = false;
   try {
     session.cloudPath = await patchUploadSession(session);
     session.cloudSyncedAt = Date.now();
     await patchDbPut(session);
+    saved = true;
     if (!quiet) toast('Patch session saved to cloud');
   } catch (e) {
     console.warn('[patch] cloud save failed', e);
     if (!quiet) toast('Patch session saved on this device only — cloud: ' + (e?.message || e), 5000);
   }
   patchRenderSessionHistory(); // refresh the per-session cloud badge
+  return saved;
 }
 
 let patchPendingSyncRunning = false;
@@ -2967,10 +3181,14 @@ async function patchRenderSessionHistory() {
     const durMin = Math.max(1, Math.round((s.endTime - s.startTime) / 60000));
     const row = document.createElement('div');
     row.className = 'patch-session-row';
+    const calibStep = s.kind === 'calibration' ? PATCH_CALIB_STEPS.find(st => st.id === s.label) : null;
+    const tag = s.kind === 'calibration'
+      ? `<div class="pill pill-green" dir="rtl">כיול · ${calibStep ? calibStep.title : s.label}</div>`
+      : `<div class="pill pill-purple">${s.events.length} events</div>`;
     row.innerHTML = `<div><div class="event-time">${dt.toLocaleDateString()} · ${dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
-        <div class="stat-lbl">${durMin} min session</div>
+        <div class="stat-lbl">${s.kind === 'calibration' ? Math.round((s.endTime - s.startTime) / 1000) + ' s calibration step' : durMin + ' min session'}</div>
         <div class="stat-lbl" data-cloud-sid="${s.sessionId}" style="color:var(--text3)">cloud: checking…</div></div>
-      <div class="pill pill-purple">${s.events.length} events</div>`;
+      ${tag}`;
     row.onclick = () => patchShowReport(s);
     listEl.appendChild(row);
   });
@@ -3004,6 +3222,544 @@ function renderPatchScreen() {
   patchSetStatus(patchState.connState);
   for (const channel of ['mic', 'acc', 'fsm']) patchDrawChart(channel);
   patchRenderSessionHistory();
+}
+
+// ═══ PATCH CALIBRATION ═══
+// A guided protocol that records one short labelled session per action (clench, grind, swallow,
+// roll over, ...), so detection thresholds can be set from real data. Each step: instructions →
+// Start → a cued timeline (lead-in, then repetitions of do/rest, then a tail), recorded through the
+// normal recorder with the step's label and exact cue times → a quality check → ✓ or "repeat".
+// Cue sounds are 2.6-2.7 kHz beeps: outside the 250-2000 Hz band the analysis uses (harmonics too,
+// see PATCH_CALIB_SOUNDS), and they show up in the bridge's 2500-2750 Hz band as sync marks between
+// the phone's cue times and the patch's data. Every cue is also broadcast on patch-live (event "calib"),
+// which patch-bridge/tools/patch_capture.mjs records on a PC.
+const PATCH_CALIB_TAIL_S = 4; // after the last repetition: rest + time for the last acc/fsm packets
+const PATCH_CALIB_READ_TEXT = 'הבוקר יצאתי מוקדם מהבית. השמיים היו בהירים והרחוב היה שקט. בדרך עצרתי לקנות קפה ולחם טרי, ואחר כך המשכתי ברגל עד התחנה. האוטובוס הגיע בזמן, ומצאתי מקום ליד החלון. כל הדרך הסתכלתי על העצים, על האנשים שחיכו ברמזורים ועל הילדים שהלכו לבית הספר עם תיקים כבדים על הגב.';
+
+// lead: seconds of quiet before the first repetition (default 5). act/rest: seconds per repetition.
+// tone 'calm': the "do" phase is not an effort (silence, reading) -- shown in blue, not red.
+const PATCH_CALIB_STEPS = [
+  { id: 'placement', where: 'sit', title: 'בדיקת מיקום', doLabel: 'להדק חזק', reps: 3, act: 2, rest: 5,
+    text: 'לשבת בנוחות. בצפצוף הכפול להדק שיניים חזק, ובצפצוף הבודד לשחרר. 3 פעמים. בסוף יופיע אם חיישן הלחץ מרגיש את השריר.' },
+  { id: 'mvc', where: 'sit', title: 'הידוק מקסימלי', doLabel: 'הכי חזק שאפשר', reps: 3, act: 3, rest: 7,
+    text: 'להדק הכי חזק שאפשר, 3 שניות, 3 פעמים.' },
+  { id: 'silence', where: 'sit', title: 'שקט', doLabel: 'שקט', tone: 'calm', lead: 3, reps: 1, act: 30, rest: 0,
+    text: '30 שניות בלי לזוז: לסת רפויה, שיניים לא נוגעות, בלי לדבר.' },
+  { id: 'clench50', where: 'sit', title: 'הידוק בינוני', doLabel: 'להדק בחצי כוח', reps: 5, act: 4, rest: 6,
+    text: 'להדק בחצי כוח, 4 שניות, 5 פעמים.' },
+  { id: 'rhythmic', where: 'sit', title: 'הידוק קצבי', doLabel: 'להדק ולשחרר בקצב', reps: 4, act: 5, rest: 7, metronome: true,
+    text: 'בכל תקתוק להדק ולשחרר, פעם בשנייה. 5 שניות, 4 פעמים.' },
+  { id: 'grind', where: 'sit', title: 'חריקה', doLabel: 'לחרוק', reps: 5, act: 5, rest: 7,
+    text: 'שיניים צמודות, להזיז את הלסת מצד לצד. 5 שניות, 5 פעמים.' },
+  { id: 'tap', where: 'sit', title: 'נקישות שיניים', doLabel: 'להקיש', reps: 3, act: 5, rest: 7,
+    text: 'להקיש שיניים עליונות בתחתונות, מהר. 5 שניות, 3 פעמים.' },
+  { id: 'speech', where: 'sit', title: 'דיבור', doLabel: 'להקריא בקול', tone: 'calm', lead: 3, reps: 1, act: 20, rest: 0, read: true,
+    text: 'להקריא בקול את הטקסט שיופיע, 20 שניות.' },
+  { id: 'swallow', where: 'sit', title: 'בליעה', doLabel: 'לבלוע', reps: 5, act: 3, rest: 8,
+    text: 'בצפצוף הכפול לבלוע רוק פעם אחת. 5 פעמים.' },
+  { id: 'cough', where: 'sit', title: 'שיעול', doLabel: 'להשתעל', reps: 2, act: 3, rest: 8,
+    text: 'בצפצוף הכפול להשתעל פעם אחת. פעמיים.' },
+  { id: 'yawn', where: 'sit', title: 'פיהוק', doLabel: 'לפהק', reps: 1, act: 6, rest: 0,
+    text: 'לפהק, או לפתוח את הפה לרווחה כמו בפיהוק.' },
+  { id: 'touch', where: 'sit', title: 'נגיעה ליד המדבקה', doLabel: 'לגעת ליד המדבקה', reps: 3, act: 3, rest: 7,
+    text: 'לגרד או לגעת בלחי ליד המדבקה, לא עליה. 3 פעמים.' },
+  { id: 'head', where: 'sit', title: 'סיבוב ראש', doLabel: 'לסובב ראש ולחזור', reps: 4, act: 3, rest: 5,
+    text: 'לסובב את הראש לצד ולחזור: פעם ימינה, פעם שמאלה. 4 פעמים.' },
+  { id: 'bed-back-clench', where: 'bed', title: 'על הגב: הידוק', doLabel: 'להדק', lead: 20, reps: 3, act: 4, rest: 6,
+    text: 'לשכב על הגב. 20 שניות שקט, ואז להדק 4 שניות, 3 פעמים.' },
+  { id: 'bed-back-grind', where: 'bed', title: 'על הגב: חריקה', doLabel: 'לחרוק', reps: 3, act: 5, rest: 7,
+    text: 'על הגב. לחרוק 5 שניות, 3 פעמים.' },
+  { id: 'bed-side-clench', where: 'bed', title: 'על צד המדבקה: הידוק', doLabel: 'להדק', lead: 20, reps: 3, act: 4, rest: 6,
+    text: 'לשכב על הצד של המדבקה, הלחי על הכרית. 20 שניות שקט, ואז להדק 4 שניות, 3 פעמים.' },
+  { id: 'bed-side-grind', where: 'bed', title: 'על צד המדבקה: חריקה', doLabel: 'לחרוק', reps: 3, act: 5, rest: 7,
+    text: 'באותה תנוחה, הלחי על הכרית. לחרוק 5 שניות, 3 פעמים.' },
+  { id: 'roll', where: 'bed', title: 'התהפכות', doLabel: 'להתהפך', reps: 4, act: 5, rest: 8,
+    text: 'בצפצוף הכפול להתהפך לצד השני. 4 פעמים.' },
+  { id: 'getup', where: 'bed', title: 'קימה והליכה', doLabel: 'לקום, ללכת ולחזור לשכב', reps: 1, act: 30, rest: 0,
+    text: 'בצפצוף הכפול לקום, להסתובב בחדר ולחזור לשכב עד הצפצוף הבודד (30 שניות).' },
+];
+const PATCH_CALIB_WHERE = { sit: 'בישיבה', bed: 'במיטה (הגשר ליד המיטה, מחובר לחשמל)' };
+const PATCH_CALIB_STORE = 'bx-patch-calib-v1';
+
+let patchCalib = null;          // the open step: {step, index, stage: 'intro'|'running'|'result', ...}
+let patchCalibAudio = null;
+let patchCalibWakeLock = null;
+
+function patchCalibProgress() {
+  try { return JSON.parse(localStorage.getItem(PATCH_CALIB_STORE) || '{}'); } catch (e) { return {}; }
+}
+
+function patchCalibSaveProgress(stepId, entry) {
+  const progress = patchCalibProgress();
+  progress[stepId] = entry;
+  try { localStorage.setItem(PATCH_CALIB_STORE, JSON.stringify(progress)); } catch (e) {}
+}
+
+function patchCalibReset() {
+  if (!confirm('להתחיל סבב כיול חדש? הסימונים יתאפסו (ההקלטות עצמן נשארות).')) return;
+  try { localStorage.removeItem(PATCH_CALIB_STORE); } catch (e) {}
+  patchCalibRenderCard();
+}
+
+function patchCalibNextIndex() {
+  const progress = patchCalibProgress();
+  const i = PATCH_CALIB_STEPS.findIndex(s => !progress[s.id]?.ok);
+  return i;
+}
+
+function patchCalibRenderCard() {
+  const listEl = document.getElementById('patch-calib-list');
+  const btn = document.getElementById('patch-calib-next');
+  const bar = document.getElementById('patch-calib-bar');
+  if (!listEl || !btn) return;
+  const progress = patchCalibProgress();
+  const done = PATCH_CALIB_STEPS.filter(s => progress[s.id]?.ok).length;
+  if (bar) bar.style.width = (done / PATCH_CALIB_STEPS.length * 100).toFixed(0) + '%';
+  const next = patchCalibNextIndex();
+  const connected = patchState.connState === 'connected';
+  const bridgeReady = !!patchState.bridgeFw;
+  btn.disabled = !connected || !bridgeReady || patchState.recording || next < 0;
+  btn.textContent = next < 0 ? `Calibration complete · ${done}/${PATCH_CALIB_STEPS.length}`
+    : !connected ? 'Connect the patch first'
+    : !bridgeReady ? 'Bridge needs the 2026-09-23 firmware'
+    : patchState.recording ? 'Stop the recording first'
+    : done ? `Next step ${next + 1}/${PATCH_CALIB_STEPS.length}` : 'Start calibration';
+
+  let html = '', lastWhere = null;
+  PATCH_CALIB_STEPS.forEach((s, i) => {
+    if (s.where !== lastWhere) { html += `<div class="patch-calib-group">${PATCH_CALIB_WHERE[s.where]}</div>`; lastWhere = s.where; }
+    const p = progress[s.id];
+    const cls = p ? (p.ok ? 'ok' : 'bad') : '';
+    const mark = p ? (p.ok ? '✓' : '!') : '';
+    html += `<div class="patch-calib-row ${cls}" onclick="patchCalibOpen(${i})"><span class="num">${i + 1}</span><span class="name">${s.title}</span><span class="mark">${mark}</span></div>`;
+  });
+  listEl.innerHTML = html;
+}
+
+function patchCalibOpenNext() {
+  const i = patchCalibNextIndex();
+  if (i >= 0) patchCalibOpen(i);
+}
+
+function patchCalibOpen(index) {
+  if (patchCalib && patchCalib.stage === 'running') return;
+  if (patchState.recording && !patchState.sessionMeta) { toast('Stop the recording first'); return; }
+  const step = PATCH_CALIB_STEPS[index];
+  patchCalib = { step, index, stage: 'intro' };
+  document.getElementById('patch-calib-overlay').classList.add('show');
+  patchCalibKeepAwake(true);
+  // Make sure the bridge sends payload v2 even if another page connected it: the fmt in this
+  // keepalive switches it over before Start is tapped.
+  patchSendCommand('keepalive');
+  patchCalibRenderIntro();
+  patchCalibTickSensors();
+}
+
+function patchCalibClose() {
+  if (patchCalib && patchCalib.stage === 'running') {
+    if (!confirm('לעצור את הצעד? ההקלטה שלו לא תישמר.')) return;
+    patchCalibAbort('cancelled');
+  }
+  patchCalib = null;
+  document.getElementById('patch-calib-overlay').classList.remove('show');
+  patchCalibKeepAwake(false);
+  patchCalibRenderCard();
+}
+
+function patchCalibSetHeader() {
+  const { step, index } = patchCalib;
+  document.getElementById('patch-calib-stepno').textContent = `צעד ${index + 1} מתוך ${PATCH_CALIB_STEPS.length} · ${PATCH_CALIB_WHERE[step.where]}`;
+  document.getElementById('patch-calib-title').textContent = step.title;
+  const done = Object.values(patchCalibProgress()).filter(p => p.ok).length;
+  document.getElementById('patch-calib-stepbar').style.width = (done / PATCH_CALIB_STEPS.length * 100).toFixed(0) + '%';
+}
+
+function patchCalibPhases(step) {
+  const phases = [{ p: 'lead', dur: step.lead ?? 5 }];
+  for (let rep = 1; rep <= step.reps; rep++) {
+    phases.push({ p: 'do', rep, dur: step.act });
+    if (rep < step.reps && step.rest) phases.push({ p: 'rest', rep, dur: step.rest });
+  }
+  phases.push({ p: 'tail', dur: PATCH_CALIB_TAIL_S });
+  return phases;
+}
+
+function patchCalibRenderIntro() {
+  const { step } = patchCalib;
+  patchCalibSetHeader();
+  const overlay = document.getElementById('patch-calib-overlay');
+  overlay.dataset.tone = '';
+  const total = patchCalibPhases(step).reduce((sum, ph) => sum + ph.dur, 0);
+  const reps = step.reps > 1 ? `${step.reps} פעמים × ${step.act} שניות` : `${step.act} שניות`;
+  const notice = patchCalib.notice
+    ? `<div class="patch-calib-result"><div class="big">⚠ ${patchCalib.notice.title}</div><div class="why">${patchCalib.notice.text}</div></div>`
+    : '';
+  document.getElementById('patch-calib-body').innerHTML = notice +
+    `<div class="patch-calib-text">${step.text}</div>
+     <div class="patch-calib-hint">${reps} · כ-${total} שניות בסך הכול.<br>צפצוף כפול = להתחיל · צפצוף בודד = לשחרר. הטלפון במרחק יד, הקול פתוח.</div>`;
+  const s = patchState.connState;
+  document.getElementById('patch-calib-actions').innerHTML =
+    s === 'connected' ? `<button class="patch-calib-btn" onclick="patchCalibStart()">Start · להתחיל</button>`
+    : s === 'offline' ? `<button class="patch-calib-btn" disabled>Bridge offline · הגשר לא מחובר</button>`
+    : s === 'connecting' || patchWantConnected ? `<button class="patch-calib-btn" disabled>Connecting… · מתחבר</button>`
+    : `<button class="patch-calib-btn" onclick="patchToggleConnect()">Connect to patch · להתחבר</button>`;
+}
+
+// iOS only lets a page make sound after a tap: this runs inside the Start button's handler.
+function patchCalibUnlockAudio() {
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {} // play even on silent
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  if (!patchCalibAudio) patchCalibAudio = new AC();
+  if (patchCalibAudio.state === 'suspended') patchCalibAudio.resume();
+}
+
+function patchCalibBeep(freq, ms, delayMs = 0, level = 0.25) {
+  const ctx = patchCalibAudio;
+  if (!ctx) return;
+  const t0 = ctx.currentTime + delayMs / 1000, t1 = t0 + ms / 1000;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = 'sine';
+  osc.frequency.value = freq;
+  // 10 ms ramps: a hard on/off click would spread energy across every band.
+  gain.gain.setValueAtTime(0, t0);
+  gain.gain.linearRampToValueAtTime(level, t0 + 0.01);
+  gain.gain.setValueAtTime(level, Math.max(t0 + 0.01, t1 - 0.01));
+  gain.gain.linearRampToValueAtTime(0, t1);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start(t0);
+  osc.stop(t1 + 0.02);
+}
+
+// The patch samples at 8 kHz with no anti-alias filter, so a speaker's harmonics fold back: a 3.5 kHz
+// beep's 2nd harmonic (7 kHz) would land at 1 kHz. Tones at 2.6-2.74 kHz keep their 2nd-5th harmonics
+// outside 250-2000 Hz (2700: 5400 -> 2600, 8100 -> 100, 10800 -> 2800 Hz). Some sound still reached
+// 250-2000 Hz in the beep's own frame when tested through PC speakers (+4-16 dB, 23.09), so the
+// analysis drops the frames around each beep -- each shows as a +50 dB peak at 2500-2750 Hz, about
+// 0.25-0.4 s after the cue (the patch's mic latency). Do / rest differ by count and length.
+const PATCH_CALIB_SOUNDS = {
+  do:    () => { patchCalibBeep(2700, 90); patchCalibBeep(2700, 90, 170); },
+  rest:  () => patchCalibBeep(2620, 260),
+  tick:  () => patchCalibBeep(2700, 35, 0, 0.12),
+  beat:  () => patchCalibBeep(2700, 45, 0, 0.18),
+  done:  () => { patchCalibBeep(2620, 110); patchCalibBeep(2700, 110, 150); patchCalibBeep(2620, 180, 300); },
+};
+
+async function patchCalibKeepAwake(on) {
+  try {
+    if (on && !patchCalibWakeLock && 'wakeLock' in navigator) {
+      patchCalibWakeLock = await navigator.wakeLock.request('screen');
+      patchCalibWakeLock.addEventListener('release', () => { patchCalibWakeLock = null; });
+    } else if (!on && patchCalibWakeLock) {
+      await patchCalibWakeLock.release();
+      patchCalibWakeLock = null;
+    }
+  } catch (e) {}
+}
+
+function patchCalibBroadcast(payload) {
+  if (!patchChannel) return;
+  patchChannel.send({ type: 'broadcast', event: 'calib', payload: { ...payload, at: Date.now() } });
+}
+
+function patchCalibStart() {
+  if (!patchCalib || patchCalib.stage !== 'intro') return;
+  if (patchState.connState !== 'connected') { toast('Patch not connected'); return; }
+  const { step } = patchCalib;
+  patchCalibUnlockAudio();
+  patchCalibKeepAwake(true);
+  patchSendCommand('keepalive'); // payload v2, and a fresh 90 s on the bridge's keepalive clock
+  patchCalib.notice = null;
+  const cues = [];
+  if (!patchStartRecording({ kind: 'calibration', label: step.id, cues })) { toast('Stop the recording first'); return; }
+  const phases = patchCalibPhases(step);
+  let at = 0;
+  for (const ph of phases) { ph.start = at; at += ph.dur * 1000; }
+  Object.assign(patchCalib, {
+    stage: 'running', phases, cues, total: at, current: -1, lastBeat: -1, lastTick: -1,
+    t0: performance.now(), sessionId: patchState.sessionStart,
+  });
+  patchCalibBroadcast({ type: 'start', step: step.id, session: patchState.sessionStart,
+    plan: phases.map(ph => ({ phase: ph.p, rep: ph.rep || 0, start: ph.start, dur: ph.dur * 1000 })) });
+  document.getElementById('patch-calib-actions').innerHTML =
+    `<button class="patch-calib-btn secondary" onclick="patchCalibClose()">Stop · לעצור</button>`;
+  patchCalib.timer = setInterval(patchCalibTick, 50);
+  patchCalibTick();
+}
+
+function patchCalibTick() {
+  const c = patchCalib;
+  if (!c || c.stage !== 'running') return;
+  const elapsed = performance.now() - c.t0;
+  if (elapsed >= c.total) { patchCalibFinish(); return; }
+  let idx = c.phases.findIndex(ph => elapsed < ph.start + ph.dur * 1000);
+  if (idx !== c.current) patchCalibEnterPhase(idx);
+  const ph = c.phases[idx];
+  const inPhase = elapsed - ph.start;
+  const left = Math.ceil((ph.dur * 1000 - inPhase) / 1000);
+  // 3-2-1 before the first repetition; a beat every second while a metronome step is "do".
+  if (ph.p === 'lead' && left <= 3 && left !== c.lastTick) { c.lastTick = left; PATCH_CALIB_SOUNDS.tick(); }
+  if (ph.p === 'do' && c.step.metronome) {
+    const beat = Math.floor(inPhase / 1000);
+    if (beat > 0 && beat !== c.lastBeat) { c.lastBeat = beat; PATCH_CALIB_SOUNDS.beat(); }
+  }
+  const countEl = document.getElementById('patch-calib-count');
+  if (countEl) countEl.textContent = left;
+}
+
+function patchCalibEnterPhase(idx) {
+  const c = patchCalib;
+  const now = Date.now();
+  const since = now - patchState.sessionStart;
+  const prev = c.cues[c.cues.length - 1];
+  if (prev) prev.end = since;
+  const ph = c.phases[idx];
+  c.current = idx;
+  c.lastBeat = 0;
+  const action = ph.p === 'do' ? c.step.id : 'rest';
+  c.cues.push({ phase: ph.p, rep: ph.rep || 0, action, start: since, end: null });
+  if (ph.p === 'do') PATCH_CALIB_SOUNDS.do();
+  else if (ph.p === 'rest' || (ph.p === 'tail' && idx > 0)) PATCH_CALIB_SOUNDS.rest();
+  patchCalibBroadcast({ type: 'phase', step: c.step.id, session: c.sessionId, phase: ph.p, action, rep: ph.rep || 0, since });
+
+  const overlay = document.getElementById('patch-calib-overlay');
+  overlay.dataset.tone = ph.p === 'do' ? (c.step.tone === 'calm' ? 'calm' : 'do') : ph.p === 'rest' ? 'rest' : '';
+  const label = ph.p === 'do' ? c.step.doLabel : ph.p === 'rest' ? 'לשחרר · מנוחה' : ph.p === 'lead' ? 'היכון…' : 'לשחרר · סיום';
+  const reps = ph.p === 'do' || ph.p === 'rest' ? (c.step.reps > 1 ? `חזרה ${ph.rep} מתוך ${c.step.reps}` : '') : '';
+  const read = c.step.read && (ph.p === 'do' || ph.p === 'lead') ? `<div class="patch-calib-read">${PATCH_CALIB_READ_TEXT}</div>` : '';
+  document.getElementById('patch-calib-body').innerHTML =
+    `<div class="patch-calib-phase">${label}</div>
+     <div class="patch-calib-count" id="patch-calib-count"></div>
+     <div class="patch-calib-rep">${reps}</div>${read}`;
+}
+
+async function patchCalibFinish() {
+  const c = patchCalib;
+  clearInterval(c.timer);
+  const last = c.cues[c.cues.length - 1];
+  if (last) last.end = Date.now() - patchState.sessionStart;
+  PATCH_CALIB_SOUNDS.done();
+  c.stage = 'saving';
+  document.getElementById('patch-calib-overlay').dataset.tone = '';
+  document.getElementById('patch-calib-body').innerHTML = '<div class="patch-calib-phase">שומר…</div>';
+  document.getElementById('patch-calib-actions').innerHTML = '';
+  const session = await patchStopRecording();
+  if (!session) return;
+  // Saved and scored even if the screen was closed meanwhile; only the rendering is skipped.
+  const result = patchCalibEvaluate(session, c.step);
+  session.calib = result;
+  try { await patchDbPut(session); } catch (e) {}
+  patchCalibSaveProgress(c.step.id, { ok: result.ok, at: Date.now(), sessionId: session.sessionId });
+  patchCalibBroadcast({ type: 'end', step: c.step.id, session: session.sessionId, result });
+  c.stage = 'result';
+  c.session = session;
+  if (patchCalib === c) patchCalibRenderResult(result, null);
+  patchCalibRenderCard();
+  const saved = await patchSaveSessionToCloud(session, true);
+  if (patchCalib === c) patchCalibRenderResult(result, saved);
+}
+
+function patchCalibAbort(reason) {
+  const c = patchCalib;
+  if (!c || c.stage !== 'running') return;
+  clearInterval(c.timer);
+  c.stage = 'intro';
+  patchCalibBroadcast({ type: 'abort', step: c.step.id, session: c.sessionId, reason });
+  // Throw the partial step away: the recorder is stopped without saving anything.
+  patchState.recording = false;
+  patchState.sessionStart = null;
+  patchState.sessionMeta = null;
+  patchState.timing = null;
+  const recStat = document.getElementById('patch-stat-rec');
+  if (recStat) recStat.textContent = 'off';
+  patchRenderRecordButton();
+}
+
+// The bridge or patch dropped mid-step: the step can't be trusted, say so and offer a retry
+// (patchSetStatus re-renders the intro, whose button follows the connection).
+function patchCalibOnDisconnect() {
+  if (!patchCalib || patchCalib.stage !== 'running') return;
+  patchCalibAbort('disconnected');
+  patchCalib.notice = { title: 'החיבור למדבקה נותק', text: 'הצעד לא נשמר. להתחבר מחדש ולהתחיל אותו שוב.' };
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (!patchCalib) return;
+  if (document.hidden && patchCalib.stage === 'running') {
+    patchCalibAbort('page hidden');
+    patchCalib.notice = { title: 'האפליקציה עברה לרקע', text: 'הצעד לא נשמר. להתחיל אותו שוב, והמסך צריך להישאר פתוח.' };
+    patchCalibRenderIntro();
+  } else if (!document.hidden) {
+    patchCalibKeepAwake(true); // iOS releases the wake lock whenever the page is hidden
+  }
+});
+
+// Live sensor dots + pressure readout while the calibration screen is open. It also keeps the
+// bridge's connection alive, even when another page (or this one before a reload) connected it.
+let patchCalibSensorTimer = null;
+let patchCalibLastKeepalive = 0;
+function patchCalibTickSensors() {
+  clearTimeout(patchCalibSensorTimer);
+  if (!patchCalib) return;
+  const now = Date.now();
+  if (now - patchCalibLastKeepalive > PATCH_KEEPALIVE_MS) {
+    patchCalibLastKeepalive = now;
+    patchSendCommand('keepalive');
+  }
+  document.querySelectorAll('#patch-calib-sensors span').forEach(el => {
+    const ch = el.dataset.ch;
+    el.classList.toggle('live', now - patchState.lastData[ch] < 3000);
+    if (ch === 'fsm') el.textContent = 'pressure' + (patchState.liveFsm !== null ? ' ' + patchState.liveFsm : '');
+  });
+  patchCalibSensorTimer = setTimeout(patchCalibTickSensors, 500);
+}
+
+// ── Step result: was the data complete, and did the sensors respond to the action? ──
+// Bridge clock -> ms since session start: the fastest flush (smallest receive-minus-send) sets it.
+function patchTimingOffset(timing) {
+  let off = Infinity;
+  for (const f of timing.flushes) off = Math.min(off, f[0] - f[2]);
+  return off;
+}
+
+// Session-ms time of every sample of a channel whose 91-sample packets arrived at `packetTimes`.
+function patchSampleTimes(packetTimes, sampleCount, offset) {
+  const gaps = [];
+  for (let i = 1; i < packetTimes.length; i++) gaps.push(packetTimes[i] - packetTimes[i - 1]);
+  gaps.sort((a, b) => a - b);
+  const dt = gaps.length ? gaps[Math.floor(gaps.length / 2)] / PATCH_PACKET_SAMPLES : 10;
+  const times = new Array(sampleCount);
+  for (let k = 0; k < packetTimes.length; k++) {
+    for (let i = 0; i < PATCH_PACKET_SAMPLES; i++) {
+      const s = k * PATCH_PACKET_SAMPLES + i;
+      if (s < sampleCount) times[s] = packetTimes[k] + offset - (PATCH_PACKET_SAMPLES - 1 - i) * dt;
+    }
+  }
+  return times;
+}
+
+function patchMeanIn(values, times, from, to) {
+  let sum = 0, n = 0;
+  for (let i = 0; i < values.length; i++) {
+    if (times[i] >= from && times[i] < to) { sum += values[i]; n++; }
+  }
+  return n ? sum / n : null;
+}
+
+function patchStdIn(values, times, from, to) {
+  const mean = patchMeanIn(values, times, from, to);
+  if (mean === null) return null;
+  let sum = 0, n = 0;
+  for (let i = 0; i < values.length; i++) {
+    if (times[i] >= from && times[i] < to) { sum += (values[i] - mean) ** 2; n++; }
+  }
+  return Math.sqrt(sum / n);
+}
+
+function patchMedian(arr) {
+  const s = arr.filter(v => v !== null && isFinite(v)).sort((a, b) => a - b);
+  return s.length ? s[Math.floor(s.length / 2)] : null;
+}
+
+function patchCalibEvaluate(session, step) {
+  const t = session.timing;
+  const durS = (session.endTime - session.startTime) / 1000;
+  const reasons = [];
+  if (!t || !t.flushes.length) return { ok: false, reasons: ['לא הגיעו נתונים מהגשר'] };
+
+  let maxGap = t.flushes[0][0];
+  for (let i = 1; i < t.flushes.length; i++) maxGap = Math.max(maxGap, t.flushes[i][0] - t.flushes[i - 1][0]);
+  const rates = {
+    micPackets: t.flushes.reduce((sum, f) => sum + f[6], 0) / durS,
+    acc: t.accT.length * PATCH_PACKET_SAMPLES / durS,
+    fsm: t.fsmT.length * PATCH_PACKET_SAMPLES / durS,
+    frames: t.bandT.length / durS,
+  };
+  if (t.gaps || t.restarts || maxGap > 2500) reasons.push('היה ניתוק קצר בחיבור, חסרים נתונים');
+  if (t.v1Flushes) reasons.push('הגשר שלח חלק מהנתונים בפורמט הישן');
+  if (rates.micPackets < 50 || rates.frames < 5) reasons.push('מעט מדי נתוני מיקרופון');
+  if (rates.acc < 50) reasons.push('מעט מדי נתוני תנועה');
+  if (rates.fsm < 30) reasons.push('מעט מדי נתוני לחץ');
+
+  // Response: each "do" against the 2 s just before it.
+  const offset = patchTimingOffset(t);
+  const fsmTimes = patchSampleTimes(t.fsmT, session.raw.fsm.length, offset);
+  const accTimes = patchSampleTimes(t.accT, session.raw.acc.length, offset);
+  const bandTimes = t.bandT.map(ms => ms + offset);
+  const brux = [];
+  for (let f = 0; f < t.bandT.length; f++) {
+    let power = 0;
+    for (let b = 1; b <= 7; b++) power += patchBandPower(t.bandV[f * PATCH_BAND_COUNT + b]); // 250-2000 Hz
+    brux.push(10 * Math.log10(power));
+  }
+  const fsmDelta = [], soundDb = [], motion = [];
+  for (const cue of session.cues.filter(q => q.phase === 'do')) {
+    const doFrom = cue.start + 300, doTo = cue.end + 300, restFrom = cue.start - 2300, restTo = cue.start - 200;
+    const fDo = patchMeanIn(session.raw.fsm, fsmTimes, doFrom, doTo);
+    const fRest = patchMeanIn(session.raw.fsm, fsmTimes, restFrom, restTo);
+    if (fDo !== null && fRest !== null) fsmDelta.push(fDo - fRest);
+    const sDo = patchMeanIn(brux, bandTimes, doFrom, doTo);
+    const sRest = patchMeanIn(brux, bandTimes, restFrom, restTo);
+    if (sDo !== null && sRest !== null) soundDb.push(sDo - sRest);
+    const aDo = patchStdIn(session.raw.acc, accTimes, doFrom, doTo);
+    const aRest = patchStdIn(session.raw.acc, accTimes, restFrom, restTo);
+    if (aDo !== null && aRest !== null) motion.push(aDo / Math.max(aRest, 1));
+  }
+  const lead = session.cues.find(q => q.phase === 'lead');
+  const fsmNoise = lead ? patchStdIn(session.raw.fsm, fsmTimes, lead.start + 500, lead.end - 200) : null;
+  const response = {
+    fsmDelta: patchMedian(fsmDelta), fsmNoise, soundDb: patchMedian(soundDb), motion: patchMedian(motion),
+  };
+
+  const result = { ok: !reasons.length, reasons, rates, maxGap, gaps: t.gaps, response };
+  if (step.id === 'placement' && result.ok) {
+    const d = Math.abs(response.fsmDelta ?? 0), noise = Math.max(response.fsmNoise ?? 0, 1);
+    result.placement = d >= 10 && d >= 5 * noise ? 'good' : d >= 2 * noise ? 'weak' : 'none';
+    if (result.placement !== 'good') result.ok = false;
+  }
+  return result;
+}
+
+function patchCalibRenderResult(result, cloudSaved) {
+  const c = patchCalib;
+  const { step, index } = c;
+  patchCalibSetHeader();
+  document.getElementById('patch-calib-overlay').dataset.tone = '';
+  let head, why = '';
+  if (step.id === 'placement' && result.placement) {
+    head = { good: '✓ המיקום טוב', weak: '⚠ תגובה חלשה', none: '⚠ חיישן הלחץ לא מגיב' }[result.placement];
+    if (result.placement !== 'good') why = 'להזיז את המדבקה כסנטימטר (קדימה או למטה, למרכז הבליטה שמתקשה בהידוק) ולחזור על הבדיקה.';
+  } else {
+    head = result.ok ? '✓ נשמר' : '⚠ כדאי לחזור על הצעד';
+    why = result.reasons.join(' · ');
+  }
+  const r = result.response || {};
+  const fmt = (v, digits, unit) => (v === null || v === undefined ? '—' : (v > 0 ? '+' : '') + v.toFixed(digits) + unit);
+  const nums = `pressure ${fmt(r.fsmDelta, 0, '')} (noise ${r.fsmNoise != null ? r.fsmNoise.toFixed(1) : '—'}) · sound 250–2000 Hz ${fmt(r.soundDb, 1, ' dB')} · motion ×${r.motion != null ? r.motion.toFixed(1) : '—'}`;
+  const cloud = cloudSaved === null ? 'שומר בענן…' : cloudSaved ? '☁ נשמר בענן' : 'נשמר במכשיר, יעלה לענן אחר כך';
+  document.getElementById('patch-calib-body').innerHTML =
+    `<div class="patch-calib-result"><div class="big">${head}</div>
+       ${why ? `<div class="why">${why}</div>` : ''}
+       <div class="nums">${nums}</div>
+       <div class="patch-calib-hint" style="margin-top:8px">${cloud}</div></div>`;
+  const next = PATCH_CALIB_STEPS.findIndex((s, i) => i > index && !patchCalibProgress()[s.id]?.ok);
+  const nextStep = next >= 0 ? PATCH_CALIB_STEPS[next] : null;
+  const moveToBed = nextStep && nextStep.where === 'bed' && step.where !== 'bed';
+  // Moving to the bed means unplugging the bridge: disconnect first, because a link cut from the
+  // bridge's side leaves the patch's mic running and has left acc/pressure silent until a restart.
+  const connected = patchState.connState === 'connected';
+  document.getElementById('patch-calib-actions').innerHTML =
+    (result.ok && nextStep
+      ? (moveToBed
+          ? `<div class="patch-calib-hint" style="text-align:center">עוברים למיטה: קודם לנתק את המדבקה, ורק אז להוציא את הגשר מהחשמל, להעביר ליד המיטה ולחבר שוב. בצעד הבא יהיה כפתור להתחבר.</div>
+             ${connected ? '<button class="patch-calib-btn" onclick="patchToggleConnect(); this.disabled = true; this.textContent = \'Disconnected · נותק\'">Disconnect · לנתק לפני המעבר</button>' : ''}`
+          : '') +
+        `<button class="patch-calib-btn ${moveToBed && connected ? 'secondary' : ''}" onclick="patchCalibOpen(${next})">Next · ${nextStep.title}</button>`
+      : '') +
+    `<button class="patch-calib-btn ${result.ok ? 'secondary' : ''}" onclick="patchCalibOpen(${index})">Repeat · לחזור על הצעד</button>` +
+    (result.ok && !nextStep ? `<button class="patch-calib-btn" onclick="patchCalibClose()">Done · סיום</button>` : '');
 }
 
 async function init(){
