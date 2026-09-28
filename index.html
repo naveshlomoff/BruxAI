@@ -177,6 +177,19 @@ html, body {
 .patch-calib-row .mark { font-size: 13px; width: 18px; text-align: center; flex-shrink: 0; }
 .patch-calib-row.ok .mark { color: var(--green); }
 .patch-calib-row.bad .mark { color: var(--amber); }
+.patch-det-counts { display: flex; gap: 8px; margin: 6px 0 6px; }
+.patch-det-count { flex: 1; text-align: center; background: var(--bg2); border: 0.5px solid var(--border); border-radius: var(--r); padding: 8px 4px; }
+.patch-det-count .n { font-size: 18px; font-weight: 700; }
+.patch-det-count .l { font-family: var(--mono); font-size: 8px; text-transform: uppercase; letter-spacing: .08em; color: var(--text3); margin-top: 2px; }
+.patch-det-row { display: flex; align-items: center; gap: 8px; padding: 7px 2px; border-bottom: 0.5px solid var(--border); font-size: 12px; color: var(--text2); }
+.patch-det-row:last-child { border-bottom: none; }
+.patch-det-row .when { font-family: var(--mono); font-size: 11px; color: var(--text); min-width: 64px; }
+.patch-det-row .cues { flex: 1; }
+.patch-det-level { font-family: var(--mono); font-size: 9px; letter-spacing: .06em; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; white-space: nowrap; }
+.patch-det-level.likely { background: var(--redlt); color: var(--red); }
+.patch-det-level.maybe { background: var(--amberlt); color: var(--amber); }
+.patch-det-level.movement { background: var(--bg3); color: var(--text3); }
+.patch-det-note { font-size: 11px; color: var(--text3); margin-top: 8px; line-height: 1.45; }
 .patch-calib-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
 .patch-calib-tab { flex: 1; font-family: var(--mono); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; padding: 8px 6px; border-radius: 999px; border: 1px solid var(--border2); background: var(--bg); color: var(--text2); cursor: pointer; }
 .patch-calib-tab.active { background: var(--text); border-color: var(--text); color: #fff; }
@@ -726,6 +739,13 @@ document.addEventListener('touchstart', function iosUnlock() {
       </div>
 
       <div class="card">
+        <div class="label">Live detection · זיהוי בזמן אמת</div>
+        <div class="patch-det-counts" id="patch-det-counts"></div>
+        <div id="patch-det-list"></div>
+        <div class="patch-det-note" dir="rtl">ניסיוני (v1), כויל על ההקלטות מ-28.09. כל אירוע מופיע כ-3 שניות אחרי שקרה.</div>
+      </div>
+
+      <div class="card">
         <div class="label" style="margin-bottom:10px">Session capture</div>
         <button id="patch-record-btn" class="patch-rec-btn" onclick="patchToggleRecording()" disabled>Start recording</button>
         <div id="patch-download-row" style="display:none;gap:8px;margin-top:10px"></div>
@@ -746,7 +766,7 @@ document.addEventListener('touchstart', function iosUnlock() {
       </div>
 
       <button id="patch-wifi-btn" class="patch-wifi-btn" onclick="patchOpenWifiSetup()" disabled>+ Add Wi-Fi network</button>
-      <div class="patch-version">Patch UI · 2026-09-28 validation<span id="patch-bridge-fw"></span></div>
+      <div class="patch-version">Patch UI · 2026-09-28 temple + live detection<span id="patch-bridge-fw"></span></div>
 
     </div></div>
   </div>
@@ -819,6 +839,7 @@ const SUPABASE_KEY = 'sb_publishable_VTSRe2BT1ppguJKRhwQF3A_xr0rUtBt';
 let supabase;
 </script>
 <script src="https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="patch-detector.js"></script>
 <script>
 const state = {
   recording: false, startTime: null, events: [],
@@ -2438,7 +2459,15 @@ const patchState = {
   bridgeFw: null,         // bridge firmware version from its status (absent before 2026-09-23)
   lastData: { mic: 0, acc: 0, fsm: 0 }, // Date.now() of each sensor's latest samples, for the live dots
   liveFsm: null,          // latest pressure sample, shown during calibration
+  clockOffset: null,      // Date.now() minus the bridge clock, over the fastest flush (maps detections to wall time)
+  detections: [],         // recent live detections (BruxDetector episodes + wall-clock times), newest last
+  sessionDetections: null, // detections while a recording runs
 };
+
+// Live bruxism detection (patch-detector.js, the calibrated rule from patch-bridge/tools/detect_v1.py).
+// Episodes arrive ~3-4 s after the activity: each frame is judged once its pressure/motion packets are in.
+const patchDetector = typeof BruxDetector !== 'undefined' ? BruxDetector.create() : null;
+if (patchDetector) patchDetector.onEpisode(patchOnDetection);
 
 // ── Payload v2 (bridge firmware "2026-09-23 bands", see flushBuffers in BroxMonBridge.ino) ──
 // Pages that send fmt 2 get samples as base64 uint16, a flush sequence number, bridge-clock
@@ -2481,6 +2510,60 @@ function patchNewTiming() {
     restarts: 0,  // the bridge rebooted mid-recording (sequence went backwards)
     lastQ: null,
   };
+}
+
+// Hands a v2 flush to the live detector: sound frames (band powers), then the pressure and motion
+// packets with their arrival times, then judges whatever is now old enough.
+function patchFeedDetector(p, decoded) {
+  const off = Date.now() - p.t;
+  // Fastest flush sets the bridge -> wall clock mapping; a jump of a minute means the bridge restarted.
+  if (patchState.clockOffset === null || off < patchState.clockOffset || off - patchState.clockOffset > 60000) patchState.clockOffset = off;
+  if (!patchDetector) return;
+  const bf = patchB64Bytes(p.bf);
+  for (let o = 0; o + PATCH_FRAME_BYTES <= bf.length; o += PATCH_FRAME_BYTES) {
+    const t = (bf[o] | (bf[o + 1] << 8) | (bf[o + 2] << 16) | (bf[o + 3] << 24)) >>> 0;
+    const powers = new Array(PATCH_BAND_COUNT);
+    for (let b = 0; b < PATCH_BAND_COUNT; b++) powers[b] = patchBandPower(bf[o + 4 + b]);
+    patchDetector.pushFrame(t, powers);
+  }
+  const feed = (values, times, push) => {
+    if (!times || !times.length || values.length !== times.length * PATCH_PACKET_SAMPLES) return;
+    times.forEach((t, k) => push(t, values.slice(k * PATCH_PACKET_SAMPLES, (k + 1) * PATCH_PACKET_SAMPLES)));
+  };
+  feed(decoded.acc, p.at, patchDetector.pushMotion);
+  feed(decoded.fsm, p.ft, patchDetector.pushPressure);
+  patchDetector.process(p.t);
+}
+
+function patchOnDetection(e) {
+  const offset = patchState.clockOffset || 0;
+  const d = Object.assign({}, e, { wallStart: Math.round(e.t0 + offset), wallEnd: Math.round(e.t1 + offset) });
+  patchState.detections.push(d);
+  if (patchState.detections.length > 200) patchState.detections.shift();
+  if (patchState.recording && patchState.sessionDetections) patchState.sessionDetections.push(d);
+  patchRenderDetections();
+  if (patchCalib && patchCalib.stage === 'result' && patchCalib.result) patchCalibRenderResult(patchCalib.result, patchCalib.cloudSaved);
+}
+
+function patchRenderDetections() {
+  const countsEl = document.getElementById('patch-det-counts');
+  const listEl = document.getElementById('patch-det-list');
+  if (!countsEl || !listEl) return;
+  const all = patchState.detections;
+  const n = (level) => all.filter(d => d.level === level).length;
+  const color = { likely: 'var(--red)', maybe: 'var(--amber)', movement: 'var(--text3)' };
+  countsEl.innerHTML = ['likely', 'maybe', 'movement'].map(level =>
+    `<div class="patch-det-count"><div class="n" style="color:${color[level]}">${n(level)}</div><div class="l">${level === 'movement' ? 'body movement' : level + ' bruxism'}</div></div>`).join('');
+  if (!all.length) {
+    listEl.innerHTML = `<div class="patch-det-note">${patchState.connState === 'connected' ? 'Listening… nothing detected yet.' : 'Connect the patch to start.'}</div>`;
+    return;
+  }
+  listEl.innerHTML = all.slice(-6).reverse().map(d => {
+    const when = new Date(d.wallStart).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const cues = d.level === 'movement' ? 'turning over / getting up'
+      : [d.sound && 'sound', d.pressure && 'pressure', d.jawMotion && 'jaw motion'].filter(Boolean).join(' + ');
+    return `<div class="patch-det-row"><span class="when">${when}</span><span class="cues">${cues} · ${(d.durationMs / 1000).toFixed(1)} s</span><span class="patch-det-level ${d.level}">${d.level}</span></div>`;
+  }).join('');
 }
 
 // Keeps what a v2 flush says about time, so every sample of a recording can be placed on one clock.
@@ -2640,7 +2723,10 @@ function patchOnBroadcastSample(payload) {
     patchState.lastData[channel] = Date.now();
   }
   if (payload.fsm && payload.fsm.length) patchState.liveFsm = payload.fsm[payload.fsm.length - 1];
-  if (v2) patchNoteFlush(v2, { mic: payload.mic.length, acc: payload.acc.length, fsm: payload.fsm.length });
+  if (v2) {
+    patchNoteFlush(v2, { mic: payload.mic.length, acc: payload.acc.length, fsm: payload.fsm.length });
+    patchFeedDetector(v2, payload);
+  }
   // A v1 flush has no packet times, so this recording's samples no longer line up with them.
   else if (patchState.recording && patchState.timing) patchState.timing.v1Flushes = (patchState.timing.v1Flushes || 0) + 1;
   const pktEl = document.getElementById('patch-stat-packets');
@@ -2768,6 +2854,9 @@ function patchSetStatus(connState) {
   patchRenderRecordButton();
   patchRenderConnectButton();
   patchCalibRenderCard();
+  // No more data is coming: judge what the detector still holds instead of leaving it pending.
+  if (connState !== 'connected' && patchDetector) patchDetector.flush();
+  patchRenderDetections();
   if (connState !== 'connected') patchCalibOnDisconnect();
   if (patchCalib && patchCalib.stage === 'intro') patchCalibRenderIntro(); // its button follows the connection
 }
@@ -2791,6 +2880,7 @@ function patchStartRecording(meta) {
   patchState.buckets = { mic: {}, acc: {}, fsm: {} };
   patchState.micLevelRows = [];
   patchState.timing = patchNewTiming();
+  patchState.sessionDetections = [];
   patchState.sessionMeta = meta || null;
   patchState.sessionStart = Date.now();
   const recStat = document.getElementById('patch-stat-rec');
@@ -2989,12 +3079,23 @@ async function patchFinishSession() {
   const sessionEnd = Date.now();
   if (!sessionStart) return null; // nothing was actually recording (e.g. disconnect guard fired with no session open)
   const meta = patchState.sessionMeta;
-  const events = patchRunDetection();
+  // With payload v2 the calibrated live detector (patch-detector.js) supplies the events; the older
+  // per-second rule (never calibrated) is only the fallback for a bridge without v2.
+  const liveDetections = (patchDetector && patchState.timing && patchState.timing.flushes.length) ? (patchState.sessionDetections || []).slice() : null;
+  const events = liveDetections
+    ? liveDetections.filter(d => d.level !== 'movement').map(d => ({
+        start: d.wallStart, end: d.wallEnd, level: d.level, confidence: d.level === 'likely' ? 'high' : 'low',
+        channels: [d.sound && 'mic', d.pressure && 'fsm', d.jawMotion && 'acc'].filter(Boolean),
+      }))
+    : patchRunDetection().map(e => ({ start: e.start.getTime(), end: e.end.getTime(), channels: e.channels, confidence: e.confidence }));
+  patchState.sessionDetections = null;
   const session = {
     sessionId: sessionStart,
     startTime: sessionStart,
     endTime: sessionEnd,
-    events: events.map(e => ({ start: e.start.getTime(), end: e.end.getTime(), channels: e.channels, confidence: e.confidence })),
+    events,
+    detector: liveDetections ? 'bruxdetector-v1' : 'per-second-v0',
+    detections: liveDetections || undefined, // every episode incl. body movement, bridge + wall times
     raw: {
       mic: patchState.csvRows.mic.slice(),
       acc: patchState.csvRows.acc.slice(),
@@ -3058,6 +3159,8 @@ async function patchUploadSession(session) {
     label: session.label || null,
     cues: session.cues || null,
     calibration: session.calib || null,
+    detector: session.detector || null,
+    detections: session.detections || null,
   });
 
   let blob = new Blob([file], { type: 'application/json' });
@@ -3155,12 +3258,16 @@ function patchShowReport(session) {
       session.events.slice().sort((a, b) => a.start - b.start).forEach(ev => {
         const durSec = Math.max(1, Math.round((ev.end - ev.start) / 1000));
         const time = new Date(ev.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        const badgeColor = ev.confidence === 'high' ? ['var(--greenlt)', 'var(--green)'] : ['var(--amberlt)', 'var(--amber)'];
+        // Live-detector events: likely = red, maybe = amber (as in the Live detection card).
+        const badgeColor = ev.level === 'likely' ? ['var(--redlt)', 'var(--red)']
+          : ev.level === 'maybe' || ev.confidence !== 'high' ? ['var(--amberlt)', 'var(--amber)'] : ['var(--greenlt)', 'var(--green)'];
+        const badge = ev.level ? `${ev.level} bruxism` : `${ev.confidence} confidence`;
+        const cues = ev.level ? ev.channels.map(c => ({ mic: 'sound', fsm: 'pressure', acc: 'jaw motion' })[c] || c).join(' + ') : ev.channels.join(' + ');
         const row = document.createElement('div');
         row.className = 'patch-event-row';
         row.innerHTML = `<div class="event-time">${time} · ${durSec}s</div>
-          <div class="event-desc">${ev.channels.join(' + ')} &nbsp;
-            <span class="tag" style="background:${badgeColor[0]};color:${badgeColor[1]}">${ev.confidence} confidence</span>
+          <div class="event-desc">${cues} &nbsp;
+            <span class="tag" style="background:${badgeColor[0]};color:${badgeColor[1]}">${badge}</span>
           </div>`;
         listEl.appendChild(row);
       });
@@ -3188,7 +3295,7 @@ async function patchRenderSessionHistory() {
     row.className = 'patch-session-row';
     const calibStep = s.kind === 'calibration' ? patchCalibStepById(s.label) : null;
     const tag = s.kind === 'calibration'
-      ? `<div class="pill pill-green" dir="rtl">${s.protocol === 'validation' ? 'אימות' : 'כיול'} · ${calibStep ? calibStep.title : s.label}</div>`
+      ? `<div class="pill pill-green" dir="rtl">${s.protocol === 'temple' ? 'כיול רקה' : 'כיול'} · ${calibStep ? calibStep.title : s.label}</div>`
       : `<div class="pill pill-purple">${s.events.length} events</div>`;
     row.innerHTML = `<div><div class="event-time">${dt.toLocaleDateString()} · ${dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
         <div class="stat-lbl">${s.kind === 'calibration' ? Math.round((s.endTime - s.startTime) / 1000) + ' s calibration step' : durMin + ' min session'}</div>
@@ -3283,67 +3390,37 @@ const PATCH_CALIB_STEPS = [
   { id: 'getup', where: 'bed', title: 'קימה והליכה', doLabel: 'לקום, ללכת ולחזור לשכב', reps: 1, act: 30, rest: 0,
     text: 'בצפצוף הכפול לקום, להסתובב בחדר ולחזור לשכב עד הצפצוף הבודד (30 שניות).' },
 ];
-// Validation round (after the 28.09 calibration): the detection rule found there, tried on fresh data --
-// on the back (how Nave sleeps; the pressure sensor barely responded there), then with tape over the
-// patch (counter-pressure, like the pillow gave on the patch side), then with the patch moved to the
-// temple over the anterior temporalis (bone-conducted sound, and a headband could press it at night).
-const PATCH_VALIDATION_STEPS = [
-  { id: 'v-back-silence', where: 'back', title: 'על הגב: שקט', doLabel: 'שקט', tone: 'calm', lead: 3, reps: 1, act: 45, rest: 0,
-    text: 'לשכב על הגב 45 שניות בלי לזוז: לסת רפויה, שיניים לא נוגעות.' },
-  { id: 'v-back-clench', where: 'back', title: 'על הגב: הידוק', doLabel: 'להדק', lead: 8, reps: 5, act: 4, rest: 6,
-    text: 'על הגב. להדק חזק 4 שניות, 5 פעמים.' },
-  { id: 'v-back-grind', where: 'back', title: 'על הגב: חריקה', doLabel: 'לחרוק', reps: 5, act: 5, rest: 7,
-    text: 'על הגב. שיניים צמודות, להזיז את הלסת מצד לצד. 5 שניות, 5 פעמים.' },
-  { id: 'v-back-speech', where: 'back', title: 'על הגב: דיבור', doLabel: 'להקריא בקול', tone: 'calm', lead: 3, reps: 1, act: 20, rest: 0, read: true,
-    text: 'על הגב, להקריא בקול את הטקסט שיופיע, 20 שניות.' },
-  { id: 'v-back-swallow', where: 'back', title: 'על הגב: בליעה', doLabel: 'לבלוע', reps: 5, act: 3, rest: 8,
-    text: 'בצפצוף הכפול לבלוע רוק פעם אחת. 5 פעמים.' },
-  { id: 'v-back-cough', where: 'back', title: 'על הגב: שיעול', doLabel: 'להשתעל', reps: 2, act: 3, rest: 8,
-    text: 'בצפצוף הכפול להשתעל פעם אחת. פעמיים.' },
-  { id: 'v-roll', where: 'back', title: 'התהפכות', doLabel: 'להתהפך', reps: 4, act: 5, rest: 8,
-    text: 'בכל צפצוף כפול להתהפך: פעם לצד, ופעם בחזרה לגב. 4 פעמים.' },
-  { id: 'v-tape-silence', where: 'tape', title: 'עם פלסטר: שקט', doLabel: 'שקט', tone: 'calm', lead: 3, reps: 1, act: 30, rest: 0,
-    text: 'על הגב, עם הפלסטר מעל המדבקה. 30 שניות בלי לזוז.' },
-  { id: 'v-tape-clench', where: 'tape', title: 'עם פלסטר: הידוק', doLabel: 'להדק', lead: 5, reps: 5, act: 4, rest: 6,
-    text: 'על הגב, עם הפלסטר. להדק חזק 4 שניות, 5 פעמים.' },
-  { id: 'v-tape-grind', where: 'tape', title: 'עם פלסטר: חריקה', doLabel: 'לחרוק', reps: 5, act: 5, rest: 7,
-    text: 'על הגב, עם הפלסטר. לחרוק 5 שניות, 5 פעמים.' },
-  { id: 'v-temple-silence', where: 'temple', title: 'ברקה: שקט', doLabel: 'שקט', tone: 'calm', lead: 3, reps: 1, act: 30, rest: 0,
-    text: 'המדבקה על הרקה, על הגב. 30 שניות בלי לזוז.' },
-  { id: 'v-temple-clench', where: 'temple', title: 'ברקה: הידוק', doLabel: 'להדק', lead: 5, reps: 5, act: 4, rest: 6,
-    text: 'המדבקה על הרקה. להדק חזק 4 שניות, 5 פעמים.' },
-  { id: 'v-temple-grind', where: 'temple', title: 'ברקה: חריקה', doLabel: 'לחרוק', reps: 5, act: 5, rest: 7,
-    text: 'המדבקה על הרקה. לחרוק 5 שניות, 5 פעמים.' },
-  { id: 'v-temple-speech', where: 'temple', title: 'ברקה: דיבור', doLabel: 'להקריא בקול', tone: 'calm', lead: 3, reps: 1, act: 20, rest: 0, read: true,
-    text: 'המדבקה על הרקה. להקריא בקול את הטקסט, 20 שניות.' },
-  { id: 'v-temple-swallow', where: 'temple', title: 'ברקה: בליעה', doLabel: 'לבלוע', reps: 5, act: 3, rest: 8,
-    text: 'המדבקה על הרקה. בצפצוף הכפול לבלוע רוק פעם אחת. 5 פעמים.' },
-];
+// Temple calibration: the same 19 steps with the patch over the anterior temporalis instead of the
+// masseter, so every step can be compared one-to-one with the 28.09 cheek calibration. The product has to
+// stay "stick it on, switch on, sleep" -- no tape, no headband -- so this is only about which spot gives
+// the sensors more.
+const PATCH_TEMPLE_STEPS = PATCH_CALIB_STEPS.map(s => Object.assign({}, s, {
+  id: 't-' + s.id,
+  where: s.where === 'bed' ? 'temple-bed' : 'temple-sit',
+  text: s.text.replace('הלחי על הכרית', 'הרקה על הכרית').replace('בלחי ליד המדבקה', 'ברקה ליד המדבקה'),
+}));
 
 // Where a run of steps happens. `before` is shown when a protocol moves into the group; `disconnect`:
 // getting there means unplugging the bridge, so the patch is disconnected first (a link cut from the
 // bridge's side leaves the patch's mic running and has left acc/pressure silent until a restart).
+const PATCH_BED_MOVE = 'עוברים למיטה: קודם לנתק את המדבקה, ורק אז להוציא את הגשר מהחשמל, להעביר ליד המיטה ולחבר שוב. בצעד הבא יהיה כפתור להתחבר.';
 const PATCH_CALIB_GROUPS = {
   sit: { label: 'בישיבה' },
-  bed: { label: 'במיטה (הגשר ליד המיטה, מחובר לחשמל)', disconnect: true,
-    before: 'עוברים למיטה: קודם לנתק את המדבקה, ורק אז להוציא את הגשר מהחשמל, להעביר ליד המיטה ולחבר שוב. בצעד הבא יהיה כפתור להתחבר.' },
-  back: { label: 'על הגב, המדבקה על הלחי',
-    before: 'שוכבים על הגב. הגשר ליד הראש, מחובר לחשמל. המדבקה על הלחי, מעל שריר הלעיסה.' },
-  tape: { label: 'על הגב, עם פלסטר מעל המדבקה',
-    before: 'עכשיו להדביק פס פלסטר רפואי לרוחב המדבקה, מתוח מעט, כך שיצמיד אותה ללחי. לא צריך לנתק.' },
-  temple: { label: 'על הגב, המדבקה על הרקה',
-    before: 'עכשיו להוריד את הפלסטר ולהעביר את המדבקה לרקה: לשקע שמאחורי הזווית החיצונית של העין, לפני קו השיער, במקום שמרגישים את השריר מתקשה כשמהדקים. אפשר פלסטר כדי שתחזיק. לא צריך לנתק.' },
+  bed: { label: 'במיטה (הגשר ליד המיטה, מחובר לחשמל)', disconnect: true, before: PATCH_BED_MOVE },
+  'temple-sit': { label: 'בישיבה, המדבקה על הרקה',
+    before: 'להדביק את המדבקה על הרקה, באותו צד כמו בכיול של הלחי: בשקע שמאחורי הזווית החיצונית של העין, לפני קו השיער. להדק שיניים ולמשש, ולמרכז את המדבקה במקום שהשריר מתקשה.' },
+  'temple-bed': { label: 'במיטה, המדבקה על הרקה (הגשר ליד המיטה, מחובר לחשמל)', disconnect: true, before: PATCH_BED_MOVE },
 };
 
 const PATCH_PROTOCOLS = {
-  calibration: { tab: 'Calibration · כיול', noun: 'calibration', steps: PATCH_CALIB_STEPS, store: 'bx-patch-calib-v1',
-    intro: 'צעדים קצרים, כ-20 דקות בסך הכול. כל צעד מקליט את עצמו: עוקבים אחרי המסך והצפצופים. צפצוף כפול = להתחיל, צפצוף בודד = לשחרר.' },
-  validation: { tab: 'Validation · אימות', noun: 'validation', steps: PATCH_VALIDATION_STEPS, store: 'bx-patch-valid-v1',
-    intro: 'סבב אימות, כ-20 דקות, הכול במיטה על הגב: קודם המדבקה על הלחי, אחר כך עם פלסטר מעליה, ובסוף על הרקה. צפצוף כפול = להתחיל, צפצוף בודד = לשחרר.' },
+  calibration: { tab: 'Cheek · לחי', noun: 'calibration', steps: PATCH_CALIB_STEPS, store: 'bx-patch-calib-v1',
+    intro: 'כיול עם המדבקה על הלחי, מעל שריר הלעיסה (בוצע ב-28.09). 19 צעדים קצרים, כ-20 דקות. צפצוף כפול = להתחיל, צפצוף בודד = לשחרר.' },
+  temple: { tab: 'Temple · רקה', noun: 'temple calibration', steps: PATCH_TEMPLE_STEPS, store: 'bx-patch-temple-v1',
+    intro: 'אותם 19 צעדים, עם המדבקה על הרקה, כדי להשוות לכיול של הלחי ולבחור את המיקום הטוב יותר. כ-20 דקות. צפצוף כפול = להתחיל, צפצוף בודד = לשחרר.' },
 };
 const PATCH_PROTOCOL_STORE = 'bx-patch-protocol';
 let patchProtocolId = (() => {
-  try { const id = localStorage.getItem(PATCH_PROTOCOL_STORE); return PATCH_PROTOCOLS[id] ? id : 'validation'; } catch (e) { return 'validation'; }
+  try { const id = localStorage.getItem(PATCH_PROTOCOL_STORE); return PATCH_PROTOCOLS[id] ? id : 'temple'; } catch (e) { return 'temple'; }
 })();
 
 let patchCalib = null;          // the open step: {protocol, step, index, stage: 'intro'|'running'|'result', ...}
@@ -3355,7 +3432,7 @@ function patchSteps(protocolId) {
 }
 
 function patchCalibStepById(id) {
-  return PATCH_CALIB_STEPS.find(s => s.id === id) || PATCH_VALIDATION_STEPS.find(s => s.id === id) || null;
+  return PATCH_CALIB_STEPS.find(s => s.id === id) || PATCH_TEMPLE_STEPS.find(s => s.id === id) || null;
 }
 
 function patchCalibSetProtocol(id) {
@@ -3655,10 +3732,26 @@ async function patchCalibFinish() {
   patchCalibBroadcast({ type: 'end', step: c.step.id, session: session.sessionId, result });
   c.stage = 'result';
   c.session = session;
+  c.result = result;
+  c.cloudSaved = null;
   if (patchCalib === c) patchCalibRenderResult(result, null);
   patchCalibRenderCard();
+  // The live detector reports ~3-4 s after the activity: refresh once its last episodes are in.
+  setTimeout(() => { if (patchCalib === c && c.stage === 'result') patchCalibRenderResult(c.result, c.cloudSaved); }, PATCH_DETECTION_SETTLE_MS + 300);
   const saved = await patchSaveSessionToCloud(session, true);
+  c.cloudSaved = saved;
   if (patchCalib === c) patchCalibRenderResult(result, saved);
+}
+
+const PATCH_DETECTION_SETTLE_MS = 5000;
+
+// What the live detector said during a calibration step (its session plus the settling time).
+function patchCalibStepDetections(c) {
+  if (!patchDetector || !c.session) return null;
+  const from = c.session.startTime, to = c.session.endTime + PATCH_DETECTION_SETTLE_MS;
+  const inStep = patchState.detections.filter(d => d.wallEnd >= from && d.wallStart <= to);
+  const n = (level) => inStep.filter(d => d.level === level).length;
+  return { likely: n('likely'), maybe: n('maybe'), movement: n('movement'), settling: Date.now() < to };
 }
 
 function patchCalibAbort(reason) {
@@ -3814,7 +3907,7 @@ function patchCalibEvaluate(session, step) {
   };
 
   const result = { ok: !reasons.length, reasons, rates, maxGap, gaps: t.gaps, response };
-  if (step.id === 'placement' && result.ok) {
+  if (step.id.endsWith('placement') && result.ok) { // placement or t-placement
     const d = Math.abs(response.fsmDelta ?? 0), noise = Math.max(response.fsmNoise ?? 0, 1);
     result.placement = d >= 10 && d >= 5 * noise ? 'good' : d >= 2 * noise ? 'weak' : 'none';
     if (result.placement !== 'good') result.ok = false;
@@ -3828,7 +3921,7 @@ function patchCalibRenderResult(result, cloudSaved) {
   patchCalibSetHeader();
   document.getElementById('patch-calib-overlay').dataset.tone = '';
   let head, why = '';
-  if (step.id === 'placement' && result.placement) {
+  if (step.id.endsWith('placement') && result.placement) {
     head = { good: '✓ המיקום טוב', weak: '⚠ תגובה חלשה', none: '⚠ חיישן הלחץ לא מגיב' }[result.placement];
     if (result.placement !== 'good') why = 'להזיז את המדבקה כסנטימטר (קדימה או למטה, למרכז הבליטה שמתקשה בהידוק) ולחזור על הבדיקה.';
   } else {
@@ -3839,10 +3932,15 @@ function patchCalibRenderResult(result, cloudSaved) {
   const fmt = (v, digits, unit) => (v === null || v === undefined ? '—' : (v > 0 ? '+' : '') + v.toFixed(digits) + unit);
   const nums = `pressure ${fmt(r.fsmDelta, 0, '')} (noise ${r.fsmNoise != null ? r.fsmNoise.toFixed(1) : '—'}) · sound 250–2000 Hz ${fmt(r.soundDb, 1, ' dB')} · motion ×${r.motion != null ? r.motion.toFixed(1) : '—'}`;
   const cloud = cloudSaved === null ? 'שומר בענן…' : cloudSaved ? '☁ נשמר בענן' : 'נשמר במכשיר, יעלה לענן אחר כך';
+  const det = patchCalibStepDetections(c);
+  const detLine = det
+    ? `<div class="patch-calib-hint" style="margin-top:8px">זיהוי בזמן אמת בצעד: כנראה ברוקסיזם ×${det.likely} · אולי ×${det.maybe} · תנועת גוף ×${det.movement}${det.settling ? ' (מתעדכן…)' : ''}</div>`
+    : '';
   document.getElementById('patch-calib-body').innerHTML =
     `<div class="patch-calib-result"><div class="big">${head}</div>
        ${why ? `<div class="why">${why}</div>` : ''}
        <div class="nums">${nums}</div>
+       ${detLine}
        <div class="patch-calib-hint" style="margin-top:8px">${cloud}</div></div>`;
   // After a good step: the next step not yet done. After a failed one: Repeat first, but the
   // following step is offered too, so one step that keeps failing can't block the rest.
