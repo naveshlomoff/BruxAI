@@ -177,6 +177,9 @@ html, body {
 .patch-calib-row .mark { font-size: 13px; width: 18px; text-align: center; flex-shrink: 0; }
 .patch-calib-row.ok .mark { color: var(--green); }
 .patch-calib-row.bad .mark { color: var(--amber); }
+.patch-calib-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+.patch-calib-tab { flex: 1; font-family: var(--mono); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; padding: 8px 6px; border-radius: 999px; border: 1px solid var(--border2); background: var(--bg); color: var(--text2); cursor: pointer; }
+.patch-calib-tab.active { background: var(--text); border-color: var(--text); color: #fff; }
 .patch-calib-reset { display: block; margin: 10px auto 0; background: none; border: none; font-family: var(--mono); font-size: 9px; letter-spacing: .06em; text-transform: uppercase; color: var(--text3); cursor: pointer; padding: 6px 10px; }
 
 .patch-calib-overlay { position: fixed; inset: 0; z-index: 1600; display: none; flex-direction: column; background: var(--bg); color: var(--text); padding: max(14px, env(safe-area-inset-top)) 18px max(14px, env(safe-area-inset-bottom)); }
@@ -729,8 +732,8 @@ document.addEventListener('touchstart', function iosUnlock() {
       </div>
 
       <div class="card">
-        <div class="label" style="margin-bottom:8px">Calibration · כיול</div>
-        <div class="patch-calib-intro" dir="rtl">צעדים קצרים, כ-20 דקות בסך הכול. כל צעד מקליט את עצמו: עוקבים אחרי המסך והצפצופים. צפצוף כפול = להתחיל, צפצוף בודד = לשחרר.</div>
+        <div class="patch-calib-tabs" id="patch-calib-tabs"></div>
+        <div class="patch-calib-intro" id="patch-calib-intro" dir="rtl"></div>
         <div class="patch-calib-progress"><div id="patch-calib-bar"></div></div>
         <button id="patch-calib-next" class="patch-calib-btn" onclick="patchCalibOpenNext()" disabled>Connect the patch first</button>
         <div id="patch-calib-list" class="patch-calib-list" dir="rtl"></div>
@@ -743,7 +746,7 @@ document.addEventListener('touchstart', function iosUnlock() {
       </div>
 
       <button id="patch-wifi-btn" class="patch-wifi-btn" onclick="patchOpenWifiSetup()" disabled>+ Add Wi-Fi network</button>
-      <div class="patch-version">Patch UI · 2026-09-23 calibration<span id="patch-bridge-fw"></span></div>
+      <div class="patch-version">Patch UI · 2026-09-28 validation<span id="patch-bridge-fw"></span></div>
 
     </div></div>
   </div>
@@ -3007,6 +3010,7 @@ async function patchFinishSession() {
   }
   if (meta) {
     session.kind = meta.kind;
+    session.protocol = meta.protocol || 'calibration';
     session.label = meta.label;
     session.cues = meta.cues.slice();
   }
@@ -3050,6 +3054,7 @@ async function patchUploadSession(session) {
     // calibration step its label, cue timeline and on-phone result.
     timing: session.timing || null,
     kind: session.kind || 'recording',
+    protocol: session.protocol || null,
     label: session.label || null,
     cues: session.cues || null,
     calibration: session.calib || null,
@@ -3181,9 +3186,9 @@ async function patchRenderSessionHistory() {
     const durMin = Math.max(1, Math.round((s.endTime - s.startTime) / 60000));
     const row = document.createElement('div');
     row.className = 'patch-session-row';
-    const calibStep = s.kind === 'calibration' ? PATCH_CALIB_STEPS.find(st => st.id === s.label) : null;
+    const calibStep = s.kind === 'calibration' ? patchCalibStepById(s.label) : null;
     const tag = s.kind === 'calibration'
-      ? `<div class="pill pill-green" dir="rtl">כיול · ${calibStep ? calibStep.title : s.label}</div>`
+      ? `<div class="pill pill-green" dir="rtl">${s.protocol === 'validation' ? 'אימות' : 'כיול'} · ${calibStep ? calibStep.title : s.label}</div>`
       : `<div class="pill pill-purple">${s.events.length} events</div>`;
     row.innerHTML = `<div><div class="event-time">${dt.toLocaleDateString()} · ${dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
         <div class="stat-lbl">${s.kind === 'calibration' ? Math.round((s.endTime - s.startTime) / 1000) + ' s calibration step' : durMin + ' min session'}</div>
@@ -3278,35 +3283,110 @@ const PATCH_CALIB_STEPS = [
   { id: 'getup', where: 'bed', title: 'קימה והליכה', doLabel: 'לקום, ללכת ולחזור לשכב', reps: 1, act: 30, rest: 0,
     text: 'בצפצוף הכפול לקום, להסתובב בחדר ולחזור לשכב עד הצפצוף הבודד (30 שניות).' },
 ];
-const PATCH_CALIB_WHERE = { sit: 'בישיבה', bed: 'במיטה (הגשר ליד המיטה, מחובר לחשמל)' };
-const PATCH_CALIB_STORE = 'bx-patch-calib-v1';
+// Validation round (after the 28.09 calibration): the detection rule found there, tried on fresh data --
+// on the back (how Nave sleeps; the pressure sensor barely responded there), then with tape over the
+// patch (counter-pressure, like the pillow gave on the patch side), then with the patch moved to the
+// temple over the anterior temporalis (bone-conducted sound, and a headband could press it at night).
+const PATCH_VALIDATION_STEPS = [
+  { id: 'v-back-silence', where: 'back', title: 'על הגב: שקט', doLabel: 'שקט', tone: 'calm', lead: 3, reps: 1, act: 45, rest: 0,
+    text: 'לשכב על הגב 45 שניות בלי לזוז: לסת רפויה, שיניים לא נוגעות.' },
+  { id: 'v-back-clench', where: 'back', title: 'על הגב: הידוק', doLabel: 'להדק', lead: 8, reps: 5, act: 4, rest: 6,
+    text: 'על הגב. להדק חזק 4 שניות, 5 פעמים.' },
+  { id: 'v-back-grind', where: 'back', title: 'על הגב: חריקה', doLabel: 'לחרוק', reps: 5, act: 5, rest: 7,
+    text: 'על הגב. שיניים צמודות, להזיז את הלסת מצד לצד. 5 שניות, 5 פעמים.' },
+  { id: 'v-back-speech', where: 'back', title: 'על הגב: דיבור', doLabel: 'להקריא בקול', tone: 'calm', lead: 3, reps: 1, act: 20, rest: 0, read: true,
+    text: 'על הגב, להקריא בקול את הטקסט שיופיע, 20 שניות.' },
+  { id: 'v-back-swallow', where: 'back', title: 'על הגב: בליעה', doLabel: 'לבלוע', reps: 5, act: 3, rest: 8,
+    text: 'בצפצוף הכפול לבלוע רוק פעם אחת. 5 פעמים.' },
+  { id: 'v-back-cough', where: 'back', title: 'על הגב: שיעול', doLabel: 'להשתעל', reps: 2, act: 3, rest: 8,
+    text: 'בצפצוף הכפול להשתעל פעם אחת. פעמיים.' },
+  { id: 'v-roll', where: 'back', title: 'התהפכות', doLabel: 'להתהפך', reps: 4, act: 5, rest: 8,
+    text: 'בכל צפצוף כפול להתהפך: פעם לצד, ופעם בחזרה לגב. 4 פעמים.' },
+  { id: 'v-tape-silence', where: 'tape', title: 'עם פלסטר: שקט', doLabel: 'שקט', tone: 'calm', lead: 3, reps: 1, act: 30, rest: 0,
+    text: 'על הגב, עם הפלסטר מעל המדבקה. 30 שניות בלי לזוז.' },
+  { id: 'v-tape-clench', where: 'tape', title: 'עם פלסטר: הידוק', doLabel: 'להדק', lead: 5, reps: 5, act: 4, rest: 6,
+    text: 'על הגב, עם הפלסטר. להדק חזק 4 שניות, 5 פעמים.' },
+  { id: 'v-tape-grind', where: 'tape', title: 'עם פלסטר: חריקה', doLabel: 'לחרוק', reps: 5, act: 5, rest: 7,
+    text: 'על הגב, עם הפלסטר. לחרוק 5 שניות, 5 פעמים.' },
+  { id: 'v-temple-silence', where: 'temple', title: 'ברקה: שקט', doLabel: 'שקט', tone: 'calm', lead: 3, reps: 1, act: 30, rest: 0,
+    text: 'המדבקה על הרקה, על הגב. 30 שניות בלי לזוז.' },
+  { id: 'v-temple-clench', where: 'temple', title: 'ברקה: הידוק', doLabel: 'להדק', lead: 5, reps: 5, act: 4, rest: 6,
+    text: 'המדבקה על הרקה. להדק חזק 4 שניות, 5 פעמים.' },
+  { id: 'v-temple-grind', where: 'temple', title: 'ברקה: חריקה', doLabel: 'לחרוק', reps: 5, act: 5, rest: 7,
+    text: 'המדבקה על הרקה. לחרוק 5 שניות, 5 פעמים.' },
+  { id: 'v-temple-speech', where: 'temple', title: 'ברקה: דיבור', doLabel: 'להקריא בקול', tone: 'calm', lead: 3, reps: 1, act: 20, rest: 0, read: true,
+    text: 'המדבקה על הרקה. להקריא בקול את הטקסט, 20 שניות.' },
+  { id: 'v-temple-swallow', where: 'temple', title: 'ברקה: בליעה', doLabel: 'לבלוע', reps: 5, act: 3, rest: 8,
+    text: 'המדבקה על הרקה. בצפצוף הכפול לבלוע רוק פעם אחת. 5 פעמים.' },
+];
 
-let patchCalib = null;          // the open step: {step, index, stage: 'intro'|'running'|'result', ...}
+// Where a run of steps happens. `before` is shown when a protocol moves into the group; `disconnect`:
+// getting there means unplugging the bridge, so the patch is disconnected first (a link cut from the
+// bridge's side leaves the patch's mic running and has left acc/pressure silent until a restart).
+const PATCH_CALIB_GROUPS = {
+  sit: { label: 'בישיבה' },
+  bed: { label: 'במיטה (הגשר ליד המיטה, מחובר לחשמל)', disconnect: true,
+    before: 'עוברים למיטה: קודם לנתק את המדבקה, ורק אז להוציא את הגשר מהחשמל, להעביר ליד המיטה ולחבר שוב. בצעד הבא יהיה כפתור להתחבר.' },
+  back: { label: 'על הגב, המדבקה על הלחי',
+    before: 'שוכבים על הגב. הגשר ליד הראש, מחובר לחשמל. המדבקה על הלחי, מעל שריר הלעיסה.' },
+  tape: { label: 'על הגב, עם פלסטר מעל המדבקה',
+    before: 'עכשיו להדביק פס פלסטר רפואי לרוחב המדבקה, מתוח מעט, כך שיצמיד אותה ללחי. לא צריך לנתק.' },
+  temple: { label: 'על הגב, המדבקה על הרקה',
+    before: 'עכשיו להוריד את הפלסטר ולהעביר את המדבקה לרקה: לשקע שמאחורי הזווית החיצונית של העין, לפני קו השיער, במקום שמרגישים את השריר מתקשה כשמהדקים. אפשר פלסטר כדי שתחזיק. לא צריך לנתק.' },
+};
+
+const PATCH_PROTOCOLS = {
+  calibration: { tab: 'Calibration · כיול', noun: 'calibration', steps: PATCH_CALIB_STEPS, store: 'bx-patch-calib-v1',
+    intro: 'צעדים קצרים, כ-20 דקות בסך הכול. כל צעד מקליט את עצמו: עוקבים אחרי המסך והצפצופים. צפצוף כפול = להתחיל, צפצוף בודד = לשחרר.' },
+  validation: { tab: 'Validation · אימות', noun: 'validation', steps: PATCH_VALIDATION_STEPS, store: 'bx-patch-valid-v1',
+    intro: 'סבב אימות, כ-20 דקות, הכול במיטה על הגב: קודם המדבקה על הלחי, אחר כך עם פלסטר מעליה, ובסוף על הרקה. צפצוף כפול = להתחיל, צפצוף בודד = לשחרר.' },
+};
+const PATCH_PROTOCOL_STORE = 'bx-patch-protocol';
+let patchProtocolId = (() => {
+  try { const id = localStorage.getItem(PATCH_PROTOCOL_STORE); return PATCH_PROTOCOLS[id] ? id : 'validation'; } catch (e) { return 'validation'; }
+})();
+
+let patchCalib = null;          // the open step: {protocol, step, index, stage: 'intro'|'running'|'result', ...}
 let patchCalibAudio = null;
 let patchCalibWakeLock = null;
 
-function patchCalibProgress() {
-  try { return JSON.parse(localStorage.getItem(PATCH_CALIB_STORE) || '{}'); } catch (e) { return {}; }
+function patchSteps(protocolId) {
+  return PATCH_PROTOCOLS[protocolId || patchProtocolId].steps;
 }
 
-function patchCalibSaveProgress(stepId, entry) {
-  const progress = patchCalibProgress();
+function patchCalibStepById(id) {
+  return PATCH_CALIB_STEPS.find(s => s.id === id) || PATCH_VALIDATION_STEPS.find(s => s.id === id) || null;
+}
+
+function patchCalibSetProtocol(id) {
+  if (!PATCH_PROTOCOLS[id] || patchCalib) return;
+  patchProtocolId = id;
+  try { localStorage.setItem(PATCH_PROTOCOL_STORE, id); } catch (e) {}
+  patchCalibRenderCard();
+}
+
+function patchCalibProgress(protocolId) {
+  try { return JSON.parse(localStorage.getItem(PATCH_PROTOCOLS[protocolId || patchProtocolId].store) || '{}'); } catch (e) { return {}; }
+}
+
+function patchCalibSaveProgress(stepId, entry, protocolId) {
+  const progress = patchCalibProgress(protocolId);
   progress[stepId] = entry;
-  try { localStorage.setItem(PATCH_CALIB_STORE, JSON.stringify(progress)); } catch (e) {}
+  try { localStorage.setItem(PATCH_PROTOCOLS[protocolId || patchProtocolId].store, JSON.stringify(progress)); } catch (e) {}
 }
 
 function patchCalibReset() {
-  if (!confirm('להתחיל סבב כיול חדש? הסימונים יתאפסו (ההקלטות עצמן נשארות).')) return;
-  try { localStorage.removeItem(PATCH_CALIB_STORE); } catch (e) {}
+  if (!confirm('להתחיל סבב חדש? הסימונים יתאפסו (ההקלטות עצמן נשארות).')) return;
+  try { localStorage.removeItem(PATCH_PROTOCOLS[patchProtocolId].store); } catch (e) {}
   patchCalibRenderCard();
 }
 
 // Steps not tried yet come first, so a skipped step (e.g. a placement check that keeps failing)
 // doesn't block the rest; then the ones that failed, for another try.
 function patchCalibNextIndex() {
-  const progress = patchCalibProgress();
-  const untried = PATCH_CALIB_STEPS.findIndex(s => !progress[s.id]);
-  return untried >= 0 ? untried : PATCH_CALIB_STEPS.findIndex(s => !progress[s.id].ok);
+  const steps = patchSteps(), progress = patchCalibProgress();
+  const untried = steps.findIndex(s => !progress[s.id]);
+  return untried >= 0 ? untried : steps.findIndex(s => !progress[s.id].ok);
 }
 
 function patchCalibRenderCard() {
@@ -3314,22 +3394,31 @@ function patchCalibRenderCard() {
   const btn = document.getElementById('patch-calib-next');
   const bar = document.getElementById('patch-calib-bar');
   if (!listEl || !btn) return;
+  const protocol = PATCH_PROTOCOLS[patchProtocolId];
+  const steps = protocol.steps;
+  const tabsEl = document.getElementById('patch-calib-tabs');
+  if (tabsEl) {
+    tabsEl.innerHTML = Object.entries(PATCH_PROTOCOLS).map(([id, p]) =>
+      `<button class="patch-calib-tab ${id === patchProtocolId ? 'active' : ''}" onclick="patchCalibSetProtocol('${id}')">${p.tab}</button>`).join('');
+  }
+  const introEl = document.getElementById('patch-calib-intro');
+  if (introEl) introEl.textContent = protocol.intro;
   const progress = patchCalibProgress();
-  const done = PATCH_CALIB_STEPS.filter(s => progress[s.id]?.ok).length;
-  if (bar) bar.style.width = (done / PATCH_CALIB_STEPS.length * 100).toFixed(0) + '%';
+  const done = steps.filter(s => progress[s.id]?.ok).length;
+  if (bar) bar.style.width = (done / steps.length * 100).toFixed(0) + '%';
   const next = patchCalibNextIndex();
   const connected = patchState.connState === 'connected';
   const bridgeReady = !!patchState.bridgeFw;
   btn.disabled = !connected || !bridgeReady || patchState.recording || next < 0;
-  btn.textContent = next < 0 ? `Calibration complete · ${done}/${PATCH_CALIB_STEPS.length}`
+  btn.textContent = next < 0 ? `${protocol.noun} complete · ${done}/${steps.length}`
     : !connected ? 'Connect the patch first'
     : !bridgeReady ? 'Bridge needs the 2026-09-23 firmware'
     : patchState.recording ? 'Stop the recording first'
-    : done ? `Next step ${next + 1}/${PATCH_CALIB_STEPS.length}` : 'Start calibration';
+    : done ? `Next step ${next + 1}/${steps.length}` : `Start ${protocol.noun}`;
 
   let html = '', lastWhere = null;
-  PATCH_CALIB_STEPS.forEach((s, i) => {
-    if (s.where !== lastWhere) { html += `<div class="patch-calib-group">${PATCH_CALIB_WHERE[s.where]}</div>`; lastWhere = s.where; }
+  steps.forEach((s, i) => {
+    if (s.where !== lastWhere) { html += `<div class="patch-calib-group">${PATCH_CALIB_GROUPS[s.where].label}</div>`; lastWhere = s.where; }
     const p = progress[s.id];
     const cls = p ? (p.ok ? 'ok' : 'bad') : '';
     const mark = p ? (p.ok ? '✓' : '!') : '';
@@ -3346,8 +3435,9 @@ function patchCalibOpenNext() {
 function patchCalibOpen(index) {
   if (patchCalib && patchCalib.stage === 'running') return;
   if (patchState.recording && !patchState.sessionMeta) { toast('Stop the recording first'); return; }
-  const step = PATCH_CALIB_STEPS[index];
-  patchCalib = { step, index, stage: 'intro' };
+  const step = patchSteps()[index];
+  if (!step) return;
+  patchCalib = { protocol: patchProtocolId, step, index, stage: 'intro' };
   document.getElementById('patch-calib-overlay').classList.add('show');
   patchCalibKeepAwake(true);
   // Make sure the bridge sends payload v2 even if another page connected it: the fmt in this
@@ -3369,11 +3459,13 @@ function patchCalibClose() {
 }
 
 function patchCalibSetHeader() {
-  const { step, index } = patchCalib;
-  document.getElementById('patch-calib-stepno').textContent = `צעד ${index + 1} מתוך ${PATCH_CALIB_STEPS.length} · ${PATCH_CALIB_WHERE[step.where]}`;
+  const { step, index, protocol } = patchCalib;
+  const steps = patchSteps(protocol);
+  document.getElementById('patch-calib-stepno').textContent = `צעד ${index + 1} מתוך ${steps.length} · ${PATCH_CALIB_GROUPS[step.where].label}`;
   document.getElementById('patch-calib-title').textContent = step.title;
-  const done = Object.values(patchCalibProgress()).filter(p => p.ok).length;
-  document.getElementById('patch-calib-stepbar').style.width = (done / PATCH_CALIB_STEPS.length * 100).toFixed(0) + '%';
+  const progress = patchCalibProgress(protocol);
+  const done = steps.filter(s => progress[s.id]?.ok).length;
+  document.getElementById('patch-calib-stepbar').style.width = (done / steps.length * 100).toFixed(0) + '%';
 }
 
 function patchCalibPhases(step) {
@@ -3396,7 +3488,13 @@ function patchCalibRenderIntro() {
   const notice = patchCalib.notice
     ? `<div class="patch-calib-result"><div class="big">⚠ ${patchCalib.notice.title}</div><div class="why">${patchCalib.notice.text}</div></div>`
     : '';
-  document.getElementById('patch-calib-body').innerHTML = notice +
+  // First step of a group (tape on, patch moved to the temple...): repeat what to do before it, in
+  // case the step was opened from the list rather than from the previous step's result.
+  const prev = patchSteps(patchCalib.protocol)[patchCalib.index - 1];
+  const group = PATCH_CALIB_GROUPS[step.where];
+  const groupHint = group.before && !group.disconnect && (!prev || prev.where !== step.where)
+    ? `<div class="patch-calib-read">${group.before}</div>` : '';
+  document.getElementById('patch-calib-body').innerHTML = notice + groupHint +
     `<div class="patch-calib-text">${step.text}</div>
      <div class="patch-calib-hint">${reps} · כ-${total} שניות בסך הכול.<br>צפצוף כפול = להתחיל · צפצוף בודד = לשחרר. הטלפון במרחק יד, הקול פתוח.</div>`;
   const s = patchState.connState;
@@ -3475,7 +3573,7 @@ function patchCalibStart() {
   patchSendCommand('keepalive'); // payload v2, and a fresh 90 s on the bridge's keepalive clock
   patchCalib.notice = null;
   const cues = [];
-  if (!patchStartRecording({ kind: 'calibration', label: step.id, cues })) { toast('Stop the recording first'); return; }
+  if (!patchStartRecording({ kind: 'calibration', protocol: patchCalib.protocol, label: step.id, cues })) { toast('Stop the recording first'); return; }
   const phases = patchCalibPhases(step);
   let at = 0;
   for (const ph of phases) { ph.start = at; at += ph.dur * 1000; }
@@ -3483,7 +3581,7 @@ function patchCalibStart() {
     stage: 'running', phases, cues, total: at, current: -1, lastBeat: -1, lastTick: -1,
     t0: performance.now(), sessionId: patchState.sessionStart,
   });
-  patchCalibBroadcast({ type: 'start', step: step.id, session: patchState.sessionStart,
+  patchCalibBroadcast({ type: 'start', protocol: patchCalib.protocol, step: step.id, session: patchState.sessionStart,
     plan: phases.map(ph => ({ phase: ph.p, rep: ph.rep || 0, start: ph.start, dur: ph.dur * 1000 })) });
   document.getElementById('patch-calib-actions').innerHTML =
     `<button class="patch-calib-btn secondary" onclick="patchCalibClose()">Stop · לעצור</button>`;
@@ -3553,7 +3651,7 @@ async function patchCalibFinish() {
   const result = patchCalibEvaluate(session, c.step);
   session.calib = result;
   try { await patchDbPut(session); } catch (e) {}
-  patchCalibSaveProgress(c.step.id, { ok: result.ok, at: Date.now(), sessionId: session.sessionId });
+  patchCalibSaveProgress(c.step.id, { ok: result.ok, at: Date.now(), sessionId: session.sessionId }, c.protocol);
   patchCalibBroadcast({ type: 'end', step: c.step.id, session: session.sessionId, result });
   c.stage = 'result';
   c.session = session;
@@ -3748,26 +3846,28 @@ function patchCalibRenderResult(result, cloudSaved) {
        <div class="patch-calib-hint" style="margin-top:8px">${cloud}</div></div>`;
   // After a good step: the next step not yet done. After a failed one: Repeat first, but the
   // following step is offered too, so one step that keeps failing can't block the rest.
-  const progress = patchCalibProgress();
+  const steps = patchSteps(c.protocol);
+  const progress = patchCalibProgress(c.protocol);
   const target = result.ok
-    ? PATCH_CALIB_STEPS.findIndex((s, i) => i > index && !progress[s.id]?.ok)
-    : (index + 1 < PATCH_CALIB_STEPS.length ? index + 1 : -1);
-  const targetStep = target >= 0 ? PATCH_CALIB_STEPS[target] : null;
-  const moveToBed = targetStep && targetStep.where === 'bed' && step.where !== 'bed';
-  // Moving to the bed means unplugging the bridge: disconnect first, because a link cut from the
-  // bridge's side leaves the patch's mic running and has left acc/pressure silent until a restart.
+    ? steps.findIndex((s, i) => i > index && !progress[s.id]?.ok)
+    : (index + 1 < steps.length ? index + 1 : -1);
+  const targetStep = target >= 0 ? steps[target] : null;
+  // Moving into another group (to the bed, tape on, patch to the temple): say what to do first, and
+  // offer Disconnect when the move means unplugging the bridge (see PATCH_CALIB_GROUPS).
+  const entering = targetStep && targetStep.where !== step.where ? PATCH_CALIB_GROUPS[targetStep.where] : null;
   const connected = patchState.connState === 'connected';
-  const bedHint = moveToBed
-    ? `<div class="patch-calib-hint" style="text-align:center">עוברים למיטה: קודם לנתק את המדבקה, ורק אז להוציא את הגשר מהחשמל, להעביר ליד המיטה ולחבר שוב. בצעד הבא יהיה כפתור להתחבר.</div>
-       ${connected ? '<button class="patch-calib-btn" onclick="patchToggleConnect(); this.disabled = true; this.textContent = \'Disconnected · נותק\'">Disconnect · לנתק לפני המעבר</button>' : ''}`
+  const needsDisconnect = !!(entering && entering.disconnect && connected);
+  const groupHint = entering && entering.before
+    ? `<div class="patch-calib-hint" style="text-align:center">${entering.before}</div>
+       ${needsDisconnect ? '<button class="patch-calib-btn" onclick="patchToggleConnect(); this.disabled = true; this.textContent = \'Disconnected · נותק\'">Disconnect · לנתק לפני המעבר</button>' : ''}`
     : '';
   const goBtn = targetStep
-    ? `<button class="patch-calib-btn ${!result.ok || (moveToBed && connected) ? 'secondary' : ''}" onclick="patchCalibOpen(${target})">${result.ok ? 'Next' : 'Skip · לדלג'} · ${targetStep.title}</button>`
+    ? `<button class="patch-calib-btn ${!result.ok || needsDisconnect ? 'secondary' : ''}" onclick="patchCalibOpen(${target})">${result.ok ? 'Next' : 'Skip · לדלג'} · ${targetStep.title}</button>`
     : '';
   const repeatBtn = `<button class="patch-calib-btn ${result.ok ? 'secondary' : ''}" onclick="patchCalibOpen(${index})">Repeat · לחזור על הצעד</button>`;
   const doneBtn = result.ok && !targetStep ? `<button class="patch-calib-btn" onclick="patchCalibClose()">Done · סיום</button>` : '';
   document.getElementById('patch-calib-actions').innerHTML =
-    result.ok ? bedHint + goBtn + doneBtn + repeatBtn : repeatBtn + bedHint + goBtn;
+    result.ok ? groupHint + goBtn + doneBtn + repeatBtn : repeatBtn + groupHint + goBtn;
 }
 
 async function init(){
