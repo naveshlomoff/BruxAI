@@ -65,7 +65,7 @@ const char* SUPABASE_KEY  = "sb_publishable_VTSRe2BT1ppguJKRhwQF3A_xr0rUtBt";
 const char* CHANNEL_TOPIC = "realtime:patch-live"; // supabase.channel('patch-live') in index.html
 const char* JOIN_REF      = "1";
 
-static const char* FIRMWARE_VERSION = "2026-09-23 bands"; // in every status; the Patch tab shows it
+static const char* FIRMWARE_VERSION = "2026-09-30 link"; // in every status; the Patch tab shows it
 
 static const unsigned long FLUSH_INTERVAL_MS        = 500;
 static const unsigned long STATUS_INTERVAL_MS       = 3000;
@@ -75,6 +75,18 @@ static const unsigned long V2_REQUEST_WINDOW_MS     = 60000; // payload v2 while
 
 static const char* PATCH_NAME_PREFIX = "BroxMon";
 static const char* PATCH_ADDR_PREFIX = "00:80:e1"; // ST's OUI -- see ScanCallbacks::onResult
+
+// Connection parameters, set by the bridge from the start. ~1 s into every connection the patch asks
+// for a 7.5-10 ms interval with a 5 s supervision timeout (BroxMon_Firmware's app_ble.c). The
+// interval is what its 8 kHz audio needs and is used as is; the timeout goes to the BLE maximum: a
+// radio shadow of over 5 s (lying with the head between patch and bridge) otherwise ends the
+// connection, and the patch's firmware can hang for good while it handles a dropped link (27.09,
+// 30.09). The patch's request is then declined, which also skips a connection-update procedure a
+// weak link can lose.
+static const uint16_t CONN_ITVL_MIN    = 6;    // x 1.25 ms = 7.5 ms
+static const uint16_t CONN_ITVL_MAX    = 8;    // 10 ms
+static const uint16_t CONN_SUPERVISION = 3200; // x 10 ms = 32 s
+static const int8_t   BLE_TX_POWER_DBM = 9;    // the ESP32's maximum (default +3): a stronger downlink
 
 // The mic is relayed at 8 kHz / MIC_DECIMATION. Plain subsampling keeps each second's standard
 // deviation (what the app's per-second event detector uses) while cutting the upload 4x.
@@ -341,11 +353,19 @@ class ScanCallbacks : public NimBLEScanCallbacks {
   void onScanEnd(const NimBLEScanResults& results, int reason) override {}
 };
 
+static volatile int  lastDisconnectReason = 0;     // NimBLE: 0x200 + HCI reason (0x208 = supervision timeout)
+static volatile bool connParamsDeclined   = false;
+
 class ClientCallbacks : public NimBLEClientCallbacks {
   void onDisconnect(NimBLEClient* pclient, int reason) override {
     // Runs on the BLE host task -- only flag it; status and rescan happen in loop().
     patchConnected = false;
+    lastDisconnectReason = reason;
     disconnectEvent = true;
+  }
+  bool onConnParamsUpdateRequest(NimBLEClient* pclient, const ble_gap_upd_params* params) override {
+    connParamsDeclined = true;
+    return false; // keep CONN_ITVL_* / CONN_SUPERVISION -- see there
   }
 };
 
@@ -420,6 +440,10 @@ void sendStatus() {
   s += ",\"fw\":\"";
   s += FIRMWARE_VERSION;
   s += "\"";
+  if (lastDisconnectReason) { // why the link last dropped, readable without the serial port
+    s += ",\"disc\":";
+    s += lastDisconnectReason;
+  }
   if (patchConnected) {
     s += ",\"deviceName\":\"";
     s += patchDeviceName;
@@ -650,6 +674,7 @@ bool connectToPatch() {
   if (pClient == nullptr) {
     pClient = NimBLEDevice::createClient();
     pClient->setClientCallbacks(&clientCallbacks, false);
+    pClient->setConnectionParams(CONN_ITVL_MIN, CONN_ITVL_MAX, 0, CONN_SUPERVISION);
   }
 
   if (!pClient->connect(targetDevice)) {
@@ -957,6 +982,7 @@ void setup() {
   ws.setReconnectInterval(3000);
 
   NimBLEDevice::init("");
+  NimBLEDevice::setPower(BLE_TX_POWER_DBM);
 
   Serial.println("=== Ready -- waiting for Connect in the app ===");
 }
@@ -970,8 +996,12 @@ void loop() {
   if (disconnectEvent) {
     disconnectEvent = false;
     disconnecting = false;
-    Serial.println("[BLE] patch disconnected");
+    Serial.printf("[BLE] patch disconnected (reason 0x%x)\n", lastDisconnectReason);
     sendStatus();
+  }
+  if (connParamsDeclined) {
+    connParamsDeclined = false;
+    Serial.println("[BLE] declined the patch's connection-parameter request (keeping 7.5-10 ms, 32 s)");
   }
 
   if (doConnect) {

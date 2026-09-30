@@ -68,12 +68,8 @@ def resample(t_src, v_src, t_dst, reducer, half_ms):
     return out
 
 
-def main():
-    flushes, calib = ac.load(sys.argv[1])
-    s = ac.build_series(flushes)
-    runs = ac.split_steps(calib)
-    mic_lag, _, beep_times, _ = ac.detect_beeps(s, runs)
-
+def detect(s, mic_lag, beep_times):
+    """Graded episodes, on the sensors' (bridge) clock, for a series from ac.build_series."""
     t = s['frame_t'] - mic_lag             # sound frames moved onto the sensors' clock
     bp = s['band_power']
     order = np.argsort(t)
@@ -144,9 +140,13 @@ def main():
             level = 'maybe'
         graded.append({'t0': t[a], 't1': t[b], 'level': level, 'sound': n_sound, 'press': n_press,
                        'voice': n_voice, 'scratch': n_scratch})
+    return graded
 
-    offset = s['offset']
-    print(f'{"step":18} {"do phases caught (maybe / likely)":>34} {"false alarms in rest":>22}   movement')
+
+def score(graded, runs, offset):
+    """Per calibration run: how many "do" phases an episode caught (maybe / likely), how much of the
+    rest time was under a maybe/likely episode, and the movement episodes during the run."""
+    rows = []
     for run in runs:
         dos = [x for x in run['phases'] if x['phase'] == 'do']
         caught_maybe = caught_likely = 0
@@ -171,9 +171,21 @@ def main():
                         alarm_ms += max(0, min(hi, g['t1'] + FRAME_MS) - max(lo, g['t0']))
         moves = sum(1 for g in graded if g['level'] == 'movement'
                     and g['t1'] >= run['start_r'] - offset and g['t0'] <= run.get('end_r', run['start_r']) - offset)
-        caught = f'{caught_maybe + caught_likely}/{len(dos)}  ({caught_maybe} / {caught_likely})'
-        alarm = f'{alarm_ms / max(rest_ms, 1) * 100:.0f}% of {rest_ms / 1000:.0f} s'
-        print(f'{run["step"]:18} {caught:>34} {alarm:>22}   {moves}')
+        rows.append({'step': run['step'], 'dos': len(dos), 'maybe': caught_maybe, 'likely': caught_likely,
+                     'rest_ms': rest_ms, 'alarm_ms': alarm_ms, 'moves': moves})
+    return rows
+
+
+def main():
+    flushes, calib = ac.load(sys.argv[1])
+    s = ac.build_series(flushes)
+    runs = ac.split_steps(calib)
+    mic_lag, _, beep_times, _ = ac.detect_beeps(s, runs)
+    print(f'{"step":18} {"do phases caught (maybe / likely)":>34} {"false alarms in rest":>22}   movement')
+    for row in score(detect(s, mic_lag, beep_times), runs, s['offset']):
+        caught = f'{row["maybe"] + row["likely"]}/{row["dos"]}  ({row["maybe"]} / {row["likely"]})'
+        alarm = f'{row["alarm_ms"] / max(row["rest_ms"], 1) * 100:.0f}% of {row["rest_ms"] / 1000:.0f} s'
+        print(f'{row["step"]:18} {caught:>34} {alarm:>22}   {row["moves"]}')
 
 
 if __name__ == '__main__':

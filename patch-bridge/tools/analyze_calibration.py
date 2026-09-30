@@ -314,7 +314,7 @@ def plot(series, runs, summary, mic_lag, beep_times, out_dir):
     fig, ax = plt.subplots(figsize=(11, 5))
     freqs = np.arange(BAND_COUNT) * BAND_HZ + BAND_HZ / 2
     for e in summary['steps']:
-        if e['band_db_delta'] and e['step'] in ('grind', 'bed-back-grind', 'bed-side-grind', 'tap', 'speech', 'swallow', 'cough', 'touch', 'yawn'):
+        if e['band_db_delta'] and e['step'].removeprefix('t-') in ('grind', 'bed-back-grind', 'bed-side-grind', 'tap', 'speech', 'swallow', 'cough', 'touch', 'yawn'):
             style = '-' if 'grind' in e['step'] else '--'
             ax.plot(freqs, e['band_db_delta'], style, marker='o', ms=3, label=e['step'])
     ax.axvspan(250, 2000, color='#6366f1', alpha=0.08)
