@@ -31,6 +31,25 @@ STEP_ORDER = ['placement', 'mvc', 'silence', 'clench50', 'rhythmic', 'grind', 't
               'bed-side-grind', 'roll', 'getup']
 PLACEMENTS = ('cheek', 'temple')
 
+# Plot labels for --he (step titles as in the app's PATCH_CALIB_STEPS).
+HE = {
+    'cheek': 'לחי', 'temple': 'רקה',
+    'placement': 'בדיקת מיקום', 'mvc': 'הידוק מקסימלי', 'silence': 'שקט', 'clench50': 'הידוק בינוני',
+    'rhythmic': 'הידוק קצבי', 'grind': 'חריקה', 'tap': 'נקישות שיניים', 'speech': 'דיבור', 'swallow': 'בליעה',
+    'cough': 'שיעול', 'yawn': 'פיהוק', 'touch': 'נגיעה ליד המדבקה', 'head': 'סיבוב ראש',
+    'bed-back-clench': 'על הגב: הידוק', 'bed-back-grind': 'על הגב: חריקה',
+    'bed-side-clench': 'על צד המדבקה: הידוק', 'bed-side-grind': 'על צד המדבקה: חריקה',
+    'roll': 'התהפכות', 'getup': 'קימה והליכה',
+    'Sound 250-2000 Hz: rise during the action': 'קול 250-2000 הרץ: העלייה בזמן הפעולה',
+    'Sound < 250 Hz (voice marker): rise during the action': 'קול מתחת ל-250 הרץ (סימן לדיבור): העלייה בזמן הפעולה',
+    'Pressure: rise during the action': 'לחץ: העלייה בזמן הפעולה',
+    'Pressure: rise / rest noise': 'לחץ: העלייה ביחס לרעש במנוחה',
+    'Motion: spread during the action / rest': 'תנועה: פי כמה מבמנוחה',
+    'Detection v1 (cheek thresholds): share of actions flagged': 'זיהוי (ספי הלחי): איזה חלק מהפעולות זוהה',
+    'counts': 'יחידות', 'share': 'חלק', 'x': 'פי', 'n/a': 'אין', 'not recorded': 'עוד לא הוקלט',
+    'pressure - rest': 'לחץ מעל המנוחה', 'seconds': 'שניות',
+}
+
 
 def base_id(step):
     return step[2:] if step.startswith('t-') else step
@@ -101,12 +120,19 @@ def print_table(res):
         print(line)
 
 
-def plot(res, out_dir):
+def plot(res, out_dir, he=False):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
     colors = {'cheek': '#6366f1', 'temple': '#f59e0b'}
+    if he:
+        plt.rcParams['font.family'] = 'Arial'  # has Hebrew; matplotlib 3.11 lays out right-to-left itself
+
+    def tr(*parts):  # a label, or "placement: step" -- in Hebrew with --he
+        return ': '.join(HE.get(x, x) if he else x for x in parts)
+
+    suffix = '_he' if he else ''
 
     def bars(ax, steps, key, title, ylabel, scale=1.0, log=None):  # log: symlog's linear range
         steps = [s for s in steps if any(res[p]['steps'].get(s) for p in PLACEMENTS)]
@@ -114,14 +140,14 @@ def plot(res, out_dir):
         for k, p in enumerate(PLACEMENTS):
             vals = [(res[p]['steps'].get(s) or {}).get(key) for s in steps]
             ax.bar(x + (k - 0.5) * 0.4, [v * scale if v is not None else 0 for v in vals], 0.4,
-                   color=colors[p], label=p)
+                   color=colors[p], label=tr(p))
             for xi, v in zip(x, vals):
                 if v is None:
-                    ax.text(xi + (k - 0.5) * 0.4, 0, 'n/a', ha='center', va='bottom', fontsize=6, color='#888')
+                    ax.text(xi + (k - 0.5) * 0.4, 0, tr('n/a'), ha='center', va='bottom', fontsize=6, color='#888')
         ax.set_xticks(x)
-        ax.set_xticklabels(steps, rotation=35, ha='right', fontsize=7)
-        ax.set_title(title, fontsize=9)
-        ax.set_ylabel(ylabel, fontsize=8)
+        ax.set_xticklabels([tr(s) for s in steps], rotation=35, ha='right', fontsize=7)
+        ax.set_title(tr(title), fontsize=9)
+        ax.set_ylabel(tr(ylabel), fontsize=8)
         ax.axhline(0, color='k', lw=0.5)
         if log:
             ax.set_yscale('symlog', linthresh=log)
@@ -146,7 +172,7 @@ def plot(res, out_dir):
                 e['caught_share'] = (e['likely'] + e['maybe']) / e['dos'] if e['dos'] else None
     bars(axes[2][1], detect_steps, 'caught_share', 'Detection v1 (cheek thresholds): share of actions flagged', 'share')
     fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, 'placement_comparison.png'), dpi=110)
+    fig.savefig(os.path.join(out_dir, f'placement_comparison{suffix}.png'), dpi=110)
     plt.close(fig)
 
     # Pressure traces of the clench / grind steps: same time axis and, per row, the same pressure
@@ -176,19 +202,21 @@ def plot(res, out_dir):
         pad = 0.08 * (lim[1] - lim[0] + 1)
         for col, p in enumerate(PLACEMENTS):
             ax = axes[row][col]
-            ax.set_title(f'{p}: {step}', fontsize=8)
+            ax.set_title(tr(p, step), fontsize=8)
             ax.tick_params(labelsize=7)
+            if row == len(show) - 1:
+                ax.set_xlabel(tr('seconds'), fontsize=7)
             if p not in traces:
-                ax.text(0.5, 0.5, 'not recorded', transform=ax.transAxes, ha='center', fontsize=8, color='#888')
+                ax.text(0.5, 0.5, tr('not recorded'), transform=ax.transAxes, ha='center', fontsize=8, color='#888')
                 continue
             t, v, spans = traces[p]
             ax.plot(t, v, '.', ms=1.5, color=colors[p])
             for a, b in spans:
                 ax.axvspan(a, b, color='#10b981', alpha=0.15)
             ax.set_ylim(lim[0] - pad, lim[1] + pad)
-            ax.set_ylabel('pressure - rest', fontsize=7)
+            ax.set_ylabel(tr('pressure - rest'), fontsize=7)
     fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, 'placement_pressure.png'), dpi=110)
+    fig.savefig(os.path.join(out_dir, f'placement_pressure{suffix}.png'), dpi=110)
     plt.close(fig)
 
 
@@ -198,6 +226,7 @@ def main():
     ap.add_argument('--temple', nargs='+', required=True)
     ap.add_argument('--out', default=None)
     ap.add_argument('--plots', action='store_true')
+    ap.add_argument('--he', action='store_true', help='Hebrew plot labels')
     args = ap.parse_args()
     out_dir = args.out or os.path.join(os.path.dirname(os.path.abspath(args.temple[0])), 'analysis-placement')
     os.makedirs(out_dir, exist_ok=True)
@@ -210,7 +239,7 @@ def main():
     with open(os.path.join(out_dir, 'placement_comparison.json'), 'w', encoding='utf-8') as fh:
         json.dump({p: {'mic_lag_ms': res[p]['mic_lag_ms'], 'steps': res[p]['steps']} for p in PLACEMENTS}, fh, indent=1)
     if args.plots:
-        plot(res, out_dir)
+        plot(res, out_dir, he=args.he)
         print(f'\nplots in {out_dir}')
 
 
