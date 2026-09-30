@@ -41,17 +41,22 @@ def u16(b64):
     return np.frombuffer(base64.b64decode(b64 or ''), dtype='<u2').astype(float)
 
 
-def load(path):
+def load(*paths):
+    """Flushes and calibration events of one capture, or of several (e.g. a calibration finished on
+    another day) merged in time order -- build_series copes with the bridge rebooting in between."""
     flushes, calib = [], []
-    with open(path, encoding='utf-8') as f:
-        for line in f:
-            if not line.strip():
-                continue
-            m = json.loads(line)
-            if m['e'] == 'sample' and m['p'].get('v') == 2:
-                flushes.append((m['r'], m['p']))
-            elif m['e'] == 'calib':
-                calib.append((m['r'], m['p']))
+    for path in paths:
+        with open(path, encoding='utf-8') as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                m = json.loads(line)
+                if m['e'] == 'sample' and m['p'].get('v') == 2:
+                    flushes.append((m['r'], m['p']))
+                elif m['e'] == 'calib':
+                    calib.append((m['r'], m['p']))
+    flushes.sort(key=lambda x: x[0])
+    calib.sort(key=lambda x: x[0])
     return flushes, calib
 
 
@@ -71,14 +76,27 @@ def packet_sample_times(packet_times, counts):
 
 
 def build_series(flushes):
-    offset = min(r - p['t'] for r, p in flushes)  # PC ms = bridge ms + offset (fastest path)
+    """All three sensors on one clock. The bridge stamps its data with its own millis(), which restart
+    (with its flush counter q) whenever it reboots, so a capture can span several clock epochs. Each
+    epoch gets its own offset (PC ms = bridge ms + offset, taken on the fastest path) and every time
+    is moved onto the PC clock -- the returned 'offset' is 0, kept so cue times convert the same way."""
+    epochs, epoch, last_q = [], 0, None
+    for r, p in flushes:
+        if last_q is not None and p.get('q') is not None and p['q'] < last_q:
+            epoch += 1
+        last_q = p.get('q', last_q)
+        epochs.append(epoch)
+    offsets = {}
+    for (r, p), e in zip(flushes, epochs):
+        offsets[e] = min(offsets.get(e, math.inf), r - p['t'])
     frame_t, frame_codes = [], []
     fsm_vals, fsm_pkt_t, acc_vals, acc_pkt_t = [], [], [], []
     rms_t, rms_v = [], []
-    for r, p in flushes:
+    for (r, p), e in zip(flushes, epochs):
+        shift = offsets[e]
         bf = base64.b64decode(p.get('bf') or '')
         for off in range(0, len(bf) - FRAME_BYTES + 1, FRAME_BYTES):
-            frame_t.append(int.from_bytes(bf[off:off + 4], 'little'))
+            frame_t.append(int.from_bytes(bf[off:off + 4], 'little') + shift)
             frame_codes.append(list(bf[off + 4:off + FRAME_BYTES]))
         for key_vals, key_t, vals_list, t_list in (('fsm', 'ft', fsm_vals, fsm_pkt_t), ('acc', 'at', acc_vals, acc_pkt_t)):
             vals = u16(p.get(key_vals))
@@ -86,14 +104,15 @@ def build_series(flushes):
             if len(pkts) and len(vals) == len(pkts) * PACKET:
                 for k, t_arr in enumerate(pkts):
                     vals_list.append(vals[k * PACKET:(k + 1) * PACKET])
-                    t_list.append(t_arr)
+                    t_list.append(t_arr + shift)
         if isinstance(p.get('micRms'), (int, float)):
-            rms_t.append(p['t'])
+            rms_t.append(p['t'] + shift)
             rms_v.append(p['micRms'])
     codes = np.array(frame_codes, float)
     band_power = np.power(10.0, (codes - 40.0) / 20.0)  # counts^2, see encodeBandCode in the .ino
     series = {
-        'offset': offset,
+        'offset': 0,
+        'epochs': len(offsets),
         'frame_t': np.array(frame_t, float),
         'band_power': band_power,
         'fsm_t': packet_sample_times(fsm_pkt_t, [len(v) for v in fsm_vals]),
@@ -249,8 +268,8 @@ def main():
             'acc_ratio': summarise(reps, 'acc_ratio'),
             'band_db_delta': (np.median([r['band_db_delta'] for r in reps if 'band_db_delta' in r], axis=0).tolist()
                               if any('band_db_delta' in r for r in reps) else None),
-            'start_bridge_ms': run['start_r'] - series['offset'],
-            'end_bridge_ms': run.get('end_r', run['start_r']) - series['offset'],
+            'start_ms': run['start_r'] - series['offset'],  # PC clock, like every time in the series
+            'end_ms': run.get('end_r', run['start_r']) - series['offset'],
         }
         summary['steps'].append(entry)
         f = lambda s, fmt: (fmt.format(s['median']) + f' ({fmt.format(s["min"])}..{fmt.format(s["max"])})') if s else '-'

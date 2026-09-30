@@ -98,7 +98,7 @@ patch**, וה-ESP32 מתחבר. **Disconnect patch** מנתק - ולפני הנ�
   `node patch-bridge/tools/patch_inspect.mjs <file>`.
 - **ניתוח:** `analyze_calibration.py <file> --plots` (כל צעד: קול, לחץ, תנועה), `detect_v1.py <file>` (כלל
   הזיהוי), `detector_replay.mjs <file>` (אותו כלל דרך `patch-detector.js` של האפליקציה),
-  `compare_placements.py <cheek> <temple> --plots` (לחי מול רקה, צעד מול צעד).
+  `compare_placements.py --cheek <files> --temple <files> --plots` (לחי מול רקה, צעד מול צעד; כמה קבצים לכל מיקום - למשל כיול שהושלם ביום אחר).
 - **במיטה:** הגשר באותו צד של המדבקה, קרוב לראש. על הגב הראש חוסם בין הרקה לגשר.
 
 **מה הגשר שולח מאז (payload v2):** עוצמת הצליל ב-16 פסים של 250Hz כל ~91ms, מחושבת מה-8kHz המלא (הצליל

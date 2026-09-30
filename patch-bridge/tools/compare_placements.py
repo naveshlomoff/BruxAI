@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Cheek vs temple: the same calibration steps recorded with the patch in two places, side by side.
 
-    python compare_placements.py <cheek capture.jsonl> <temple capture.jsonl> [--out DIR] [--plots]
+    python compare_placements.py --cheek <capture.jsonl>... --temple <capture.jsonl>... [--out DIR] [--plots]
 
-Steps are matched by id (the temple protocol's ids are the cheek ones with a "t-" prefix); a step
-that was run more than once counts by its last completed run. Per step and placement:
+Each placement takes one capture or several (a calibration finished on another day). Steps are
+matched by id (the temple protocol's ids are the cheek ones with a "t-" prefix); a step that was run
+more than once counts by its last completed run. Per step and placement:
   sound     - 250-2000 Hz rise during the action (dB), and the <250 Hz rise, the voice marker
               (speech, coughs and tapping raise it, grinding hardly does)
   pressure  - mean rise during the action, the rest-time noise (sd) and their ratio
@@ -40,8 +41,8 @@ def median(reps, key, pick=None):
     return float(np.median(vals)) if vals else None
 
 
-def analyse_capture(path):
-    flushes, calib = ac.load(path)
+def analyse_capture(paths):
+    flushes, calib = ac.load(*paths)
     s = ac.build_series(flushes)
     runs = ac.split_steps(calib)
     mic_lag, _, beep_times, _ = ac.detect_beeps(s, runs)
@@ -193,12 +194,12 @@ def plot(res, out_dir):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('cheek')
-    ap.add_argument('temple')
+    ap.add_argument('--cheek', nargs='+', required=True)
+    ap.add_argument('--temple', nargs='+', required=True)
     ap.add_argument('--out', default=None)
     ap.add_argument('--plots', action='store_true')
     args = ap.parse_args()
-    out_dir = args.out or os.path.join(os.path.dirname(os.path.abspath(args.temple)), 'analysis-placement')
+    out_dir = args.out or os.path.join(os.path.dirname(os.path.abspath(args.temple[0])), 'analysis-placement')
     os.makedirs(out_dir, exist_ok=True)
 
     res = {'cheek': analyse_capture(args.cheek), 'temple': analyse_capture(args.temple)}
