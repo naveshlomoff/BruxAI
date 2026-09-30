@@ -766,7 +766,7 @@ document.addEventListener('touchstart', function iosUnlock() {
       </div>
 
       <button id="patch-wifi-btn" class="patch-wifi-btn" onclick="patchOpenWifiSetup()" disabled>+ Add Wi-Fi network</button>
-      <div class="patch-version">Patch UI · 2026-09-28 temple + live detection<span id="patch-bridge-fw"></span></div>
+      <div class="patch-version">Patch UI · 2026-09-30 bridge by the head<span id="patch-bridge-fw"></span></div>
 
     </div></div>
   </div>
@@ -3403,13 +3403,15 @@ const PATCH_TEMPLE_STEPS = PATCH_CALIB_STEPS.map(s => Object.assign({}, s, {
 // Where a run of steps happens. `before` is shown when a protocol moves into the group; `disconnect`:
 // getting there means unplugging the bridge, so the patch is disconnected first (a link cut from the
 // bridge's side leaves the patch's mic running and has left acc/pressure silent until a restart).
-const PATCH_BED_MOVE = 'עוברים למיטה: קודם לנתק את המדבקה, ורק אז להוציא את הגשר מהחשמל, להעביר ליד המיטה ולחבר שוב. בצעד הבא יהיה כפתור להתחבר.';
+// In bed the bridge goes on the patch's side, by the head: lying on the back, the head shadows a
+// temple patch from a bridge on the far side (30.09: the link dropped within seconds, the patch hung).
+const PATCH_BED_MOVE = 'עוברים למיטה: קודם לנתק את המדבקה, ורק אז להוציא את הגשר מהחשמל, להעביר למיטה ולחבר שוב: בצד של המדבקה, צמוד לראש, כך שהראש לא יסתיר ביניהם כשאתה שוכב על הגב. בצעד הבא יהיה כפתור להתחבר.';
 const PATCH_CALIB_GROUPS = {
   sit: { label: 'בישיבה' },
-  bed: { label: 'במיטה (הגשר ליד המיטה, מחובר לחשמל)', disconnect: true, before: PATCH_BED_MOVE },
+  bed: { label: 'במיטה (הגשר בצד של המדבקה, צמוד לראש, מחובר לחשמל)', disconnect: true, before: PATCH_BED_MOVE },
   'temple-sit': { label: 'בישיבה, המדבקה על הרקה',
     before: 'להדביק את המדבקה על הרקה, באותו צד כמו בכיול של הלחי: בשקע שמאחורי הזווית החיצונית של העין, לפני קו השיער. להדק שיניים ולמשש, ולמרכז את המדבקה במקום שהשריר מתקשה.' },
-  'temple-bed': { label: 'במיטה, המדבקה על הרקה (הגשר ליד המיטה, מחובר לחשמל)', disconnect: true, before: PATCH_BED_MOVE },
+  'temple-bed': { label: 'במיטה, המדבקה על הרקה (הגשר בצד של המדבקה, צמוד לראש, מחובר לחשמל)', disconnect: true, before: PATCH_BED_MOVE },
 };
 
 const PATCH_PROTOCOLS = {

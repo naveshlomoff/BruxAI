@@ -50,6 +50,7 @@ let closing = false;
 // ── rolling stats for the 10 s summary ──
 const stats = { flushes: 0, gaps: 0, v1: 0, mic: 0, acc: 0, fsm: 0, frames: 0, maxGapMs: 0, lastRecv: 0, state: '?' };
 let lastSeq = null;
+let patchWasConnected = false;
 let bandSum = new Array(BAND_COUNT).fill(0);
 
 function send(msg) {
@@ -143,7 +144,16 @@ function connect() {
     const p = msg.payload?.payload || {};
     out.write(JSON.stringify({ r: recv, e: event, p }) + '\n');
     if (event === 'sample') onSample(p, recv);
-    else if (event === 'status') stats.state = p.state || (p.patchConnected ? 'connected' : 'idle');
+    else if (event === 'status') {
+      stats.state = p.state || (p.patchConnected ? 'connected' : 'idle');
+      // "-> connecting" is a drop (the bridge went back to scanning), "-> idle" a Disconnect. disc is
+      // the bridge's last disconnect reason (fw 2026-09-30+): 0x208 = the link timed out.
+      if (patchWasConnected && !p.patchConnected) {
+        console.log(`[link] ${new Date(recv).toLocaleTimeString()} patch link ended -> ${stats.state}` +
+          (p.disc ? ` (reason 0x${p.disc.toString(16)})` : ''));
+      }
+      patchWasConnected = !!p.patchConnected;
+    }
     else if (event === 'calib') {
       const what = p.type === 'phase' ? `${p.phase} ${p.action || ''} #${p.rep ?? ''}` : p.type;
       console.log(`[calib] ${new Date(recv).toLocaleTimeString()} ${p.step} ${what}${p.result ? ' ' + JSON.stringify(p.result) : ''}`);
