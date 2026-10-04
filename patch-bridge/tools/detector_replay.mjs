@@ -3,7 +3,7 @@
 // flush as the app receives them, and scores the episodes against the calibration steps -- the same
 // table as detect_v1.py, so the live implementation can be checked against the reference.
 //
-//   node detector_replay.mjs <capture.jsonl>... [--list]
+//   node detector_replay.mjs <capture.jsonl>... [--profile temple|cheek] [--list]
 //
 // Several captures (a calibration finished on another day) are merged in time order. The bridge's
 // clock and flush counter restart when it reboots; each clock epoch gets its own offset and every
@@ -15,8 +15,11 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const BruxDetector = require('../../patch-detector.js');
 
-const files = process.argv.slice(2).filter((a) => !a.startsWith('--'));
-if (!files.length) { console.error('usage: node detector_replay.mjs <capture.jsonl>... [--list]'); process.exit(1); }
+const args = process.argv.slice(2);
+const profileAt = args.indexOf('--profile');
+const profile = profileAt >= 0 ? args[profileAt + 1] : 'temple';
+const files = args.filter((a, i) => !a.startsWith('--') && !(profileAt >= 0 && i === profileAt + 1));
+if (!files.length) { console.error('usage: node detector_replay.mjs <capture.jsonl>... [--profile temple|cheek] [--list]'); process.exit(1); }
 const PHONE_LATENCY_MS = 100;
 const BAND_COUNT = 16, FRAME_BYTES = 4 + BAND_COUNT, PACKET = 91;
 
@@ -33,7 +36,7 @@ const shifts = new Map();
 for (const f of flushes) shifts.set(f.epoch, Math.min(shifts.get(f.epoch) ?? Infinity, f.r - f.p.t));
 const offset = 0; // every time below is on the PC clock
 
-const detector = BruxDetector.create();
+const detector = BruxDetector.create({ profile });
 const episodes = [];
 detector.onEpisode((e) => episodes.push(e));
 

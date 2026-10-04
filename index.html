@@ -742,7 +742,7 @@ document.addEventListener('touchstart', function iosUnlock() {
         <div class="label">Live detection · זיהוי בזמן אמת</div>
         <div class="patch-det-counts" id="patch-det-counts"></div>
         <div id="patch-det-list"></div>
-        <div class="patch-det-note" dir="rtl">ניסיוני (v1), כויל על ההקלטות מ-28.09. כל אירוע מופיע כ-3 שניות אחרי שקרה.</div>
+        <div class="patch-det-note" dir="rtl">ניסיוני, מכויל למדבקה על הרקה (הקלטות הכיול מ-30.09 ו-04.10). כל אירוע מופיע כ-10 שניות אחרי שקרה.</div>
       </div>
 
       <div class="card">
@@ -766,7 +766,7 @@ document.addEventListener('touchstart', function iosUnlock() {
       </div>
 
       <button id="patch-wifi-btn" class="patch-wifi-btn" onclick="patchOpenWifiSetup()" disabled>+ Add Wi-Fi network</button>
-      <div class="patch-version">Patch UI · 2026-09-30 bridge by the head<span id="patch-bridge-fw"></span></div>
+      <div class="patch-version">Patch UI · 2026-10-04 temple detection<span id="patch-bridge-fw"></span></div>
 
     </div></div>
   </div>
@@ -2464,9 +2464,10 @@ const patchState = {
   sessionDetections: null, // detections while a recording runs
 };
 
-// Live bruxism detection (patch-detector.js, the calibrated rule from patch-bridge/tools/detect_v1.py).
-// Episodes arrive ~3-4 s after the activity: each frame is judged once its pressure/motion packets are in.
-const patchDetector = typeof BruxDetector !== 'undefined' ? BruxDetector.create() : null;
+// Live bruxism detection (patch-detector.js, the calibrated rule from patch-bridge/tools/detect_v1.py),
+// temple profile -- the chosen placement. Episodes arrive ~9-10 s after the activity: each frame is
+// judged once its pressure/motion packets are in, and a "likely" waits 5 s for any body movement.
+const patchDetector = typeof BruxDetector !== 'undefined' ? BruxDetector.create({ profile: 'temple' }) : null;
 if (patchDetector) patchDetector.onEpisode(patchOnDetection);
 
 // ── Payload v2 (bridge firmware "2026-09-23 bands", see flushBuffers in BroxMonBridge.ino) ──
@@ -2561,7 +2562,8 @@ function patchRenderDetections() {
   listEl.innerHTML = all.slice(-6).reverse().map(d => {
     const when = new Date(d.wallStart).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     const cues = d.level === 'movement' ? 'turning over / getting up'
-      : [d.sound && 'sound', d.pressure && 'pressure', d.jawMotion && 'jaw motion'].filter(Boolean).join(' + ');
+      : (d.kind ? (d.kind === 'clench' ? 'clenching' : 'grinding') + ' · ' : '')
+        + [d.sound && 'sound', d.pressure && 'pressure', d.jawMotion && 'jaw motion'].filter(Boolean).join(' + ');
     return `<div class="patch-det-row"><span class="when">${when}</span><span class="cues">${cues} · ${(d.durationMs / 1000).toFixed(1)} s</span><span class="patch-det-level ${d.level}">${d.level}</span></div>`;
   }).join('');
 }
@@ -3084,7 +3086,7 @@ async function patchFinishSession() {
   const liveDetections = (patchDetector && patchState.timing && patchState.timing.flushes.length) ? (patchState.sessionDetections || []).slice() : null;
   const events = liveDetections
     ? liveDetections.filter(d => d.level !== 'movement').map(d => ({
-        start: d.wallStart, end: d.wallEnd, level: d.level, confidence: d.level === 'likely' ? 'high' : 'low',
+        start: d.wallStart, end: d.wallEnd, level: d.level, kind: d.kind, confidence: d.level === 'likely' ? 'high' : 'low',
         channels: [d.sound && 'mic', d.pressure && 'fsm', d.jawMotion && 'acc'].filter(Boolean),
       }))
     : patchRunDetection().map(e => ({ start: e.start.getTime(), end: e.end.getTime(), channels: e.channels, confidence: e.confidence }));
@@ -3261,7 +3263,7 @@ function patchShowReport(session) {
         // Live-detector events: likely = red, maybe = amber (as in the Live detection card).
         const badgeColor = ev.level === 'likely' ? ['var(--redlt)', 'var(--red)']
           : ev.level === 'maybe' || ev.confidence !== 'high' ? ['var(--amberlt)', 'var(--amber)'] : ['var(--greenlt)', 'var(--green)'];
-        const badge = ev.level ? `${ev.level} bruxism` : `${ev.confidence} confidence`;
+        const badge = ev.level ? `${ev.level} bruxism${ev.kind ? ' · ' + (ev.kind === 'clench' ? 'clenching' : 'grinding') : ''}` : `${ev.confidence} confidence`;
         const cues = ev.level ? ev.channels.map(c => ({ mic: 'sound', fsm: 'pressure', acc: 'jaw motion' })[c] || c).join(' + ') : ev.channels.join(' + ');
         const row = document.createElement('div');
         row.className = 'patch-event-row';
@@ -3738,22 +3740,24 @@ async function patchCalibFinish() {
   c.cloudSaved = null;
   if (patchCalib === c) patchCalibRenderResult(result, null);
   patchCalibRenderCard();
-  // The live detector reports ~3-4 s after the activity: refresh once its last episodes are in.
+  // The live detector reports ~9-10 s after the activity: refresh once its last episodes are in.
   setTimeout(() => { if (patchCalib === c && c.stage === 'result') patchCalibRenderResult(c.result, c.cloudSaved); }, PATCH_DETECTION_SETTLE_MS + 300);
   const saved = await patchSaveSessionToCloud(session, true);
   c.cloudSaved = saved;
   if (patchCalib === c) patchCalibRenderResult(result, saved);
 }
 
-const PATCH_DETECTION_SETTLE_MS = 5000;
+// Judging delay 2.5 s + merge gap 1.5 s + the temple profile's 5 s look at body movement, + margin.
+const PATCH_DETECTION_SETTLE_MS = 11000;
 
 // What the live detector said during a calibration step (its session plus the settling time).
 function patchCalibStepDetections(c) {
   if (!patchDetector || !c.session) return null;
   const from = c.session.startTime, to = c.session.endTime + PATCH_DETECTION_SETTLE_MS;
   const inStep = patchState.detections.filter(d => d.wallEnd >= from && d.wallStart <= to);
-  const n = (level) => inStep.filter(d => d.level === level).length;
-  return { likely: n('likely'), maybe: n('maybe'), movement: n('movement'), settling: Date.now() < to };
+  const n = (level, kind) => inStep.filter(d => d.level === level && (!kind || d.kind === kind)).length;
+  return { likely: n('likely'), grind: n('likely', 'grind'), clench: n('likely', 'clench'), maybe: n('maybe'),
+    movement: n('movement'), settling: Date.now() < to };
 }
 
 function patchCalibAbort(reason) {
@@ -3889,12 +3893,13 @@ function patchCalibEvaluate(session, step) {
     for (let b = 1; b <= 7; b++) power += patchBandPower(t.bandV[f * PATCH_BAND_COUNT + b]); // 250-2000 Hz
     brux.push(10 * Math.log10(power));
   }
-  const fsmDelta = [], soundDb = [], motion = [];
+  const fsmDelta = [], fsmRestSd = [], soundDb = [], motion = [];
   for (const cue of session.cues.filter(q => q.phase === 'do')) {
     const doFrom = cue.start + 300, doTo = cue.end + 300, restFrom = cue.start - 2300, restTo = cue.start - 200;
     const fDo = patchMeanIn(session.raw.fsm, fsmTimes, doFrom, doTo);
     const fRest = patchMeanIn(session.raw.fsm, fsmTimes, restFrom, restTo);
     if (fDo !== null && fRest !== null) fsmDelta.push(fDo - fRest);
+    fsmRestSd.push(patchStdIn(session.raw.fsm, fsmTimes, restFrom, restTo));
     const sDo = patchMeanIn(brux, bandTimes, doFrom, doTo);
     const sRest = patchMeanIn(brux, bandTimes, restFrom, restTo);
     if (sDo !== null && sRest !== null) soundDb.push(sDo - sRest);
@@ -3902,8 +3907,9 @@ function patchCalibEvaluate(session, step) {
     const aRest = patchStdIn(session.raw.acc, accTimes, restFrom, restTo);
     if (aDo !== null && aRest !== null) motion.push(aDo / Math.max(aRest, 1));
   }
-  const lead = session.cues.find(q => q.phase === 'lead');
-  const fsmNoise = lead ? patchStdIn(session.raw.fsm, fsmTimes, lead.start + 500, lead.end - 200) : null;
+  // Noise = the pressure's spread in the 2 s before each clench, not over the lead-in, where a patch
+  // just pressed on is still settling (30.09: lead-in 171 vs ~14 before the clenches -> false "none").
+  const fsmNoise = patchMedian(fsmRestSd);
   const response = {
     fsmDelta: patchMedian(fsmDelta), fsmNoise, soundDb: patchMedian(soundDb), motion: patchMedian(motion),
   };
@@ -3925,7 +3931,7 @@ function patchCalibRenderResult(result, cloudSaved) {
   let head, why = '';
   if (step.id.endsWith('placement') && result.placement) {
     head = { good: '✓ המיקום טוב', weak: '⚠ תגובה חלשה', none: '⚠ חיישן הלחץ לא מגיב' }[result.placement];
-    if (result.placement !== 'good') why = 'להזיז את המדבקה כסנטימטר (קדימה או למטה, למרכז הבליטה שמתקשה בהידוק) ולחזור על הבדיקה.';
+    if (result.placement !== 'good') why = 'להזיז את המדבקה כסנטימטר, למרכז הבליטה שמתקשה בהידוק, ולחזור על הבדיקה.';
   } else {
     head = result.ok ? '✓ נשמר' : '⚠ כדאי לחזור על הצעד';
     why = result.reasons.join(' · ');
@@ -3936,7 +3942,7 @@ function patchCalibRenderResult(result, cloudSaved) {
   const cloud = cloudSaved === null ? 'שומר בענן…' : cloudSaved ? '☁ נשמר בענן' : 'נשמר במכשיר, יעלה לענן אחר כך';
   const det = patchCalibStepDetections(c);
   const detLine = det
-    ? `<div class="patch-calib-hint" style="margin-top:8px">זיהוי בזמן אמת בצעד: כנראה ברוקסיזם ×${det.likely} · אולי ×${det.maybe} · תנועת גוף ×${det.movement}${det.settling ? ' (מתעדכן…)' : ''}</div>`
+    ? `<div class="patch-calib-hint" style="margin-top:8px">זיהוי בזמן אמת בצעד: כנראה ברוקסיזם ×${det.likely}${det.likely ? ` (חריקה ×${det.grind}, הידוק ×${det.clench})` : ''} · אולי ×${det.maybe} · תנועת גוף ×${det.movement}${det.settling ? ' (מתעדכן…)' : ''}</div>`
     : '';
   document.getElementById('patch-calib-body').innerHTML =
     `<div class="patch-calib-result"><div class="big">${head}</div>

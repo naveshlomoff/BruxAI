@@ -10,8 +10,8 @@ more than once counts by its last completed run. Per step and placement:
               (speech, coughs and tapping raise it, grinding hardly does)
   pressure  - mean rise during the action, the rest-time noise (sd) and their ratio
   motion    - accelerometer spread, action over rest
-  detection - detect_v1 over the whole capture: "do" phases caught (likely + maybe of all) and the
-              share of rest time under a false alarm
+  detection - detect_v1 over the whole capture, with that placement's profile: "do" phases caught
+              (likely + maybe of all) and the share of rest time under a false alarm
   link      - sound frames per second and pressure samples per second that reached the bridge
 Writes <out>/placement_comparison.json and, with --plots, placement_comparison.png and
 placement_pressure.png.
@@ -45,7 +45,7 @@ HE = {
     'Pressure: rise during the action': 'לחץ: העלייה בזמן הפעולה',
     'Pressure: rise / rest noise': 'לחץ: העלייה ביחס לרעש במנוחה',
     'Motion: spread during the action / rest': 'תנועה: פי כמה מבמנוחה',
-    'Detection v1 (cheek thresholds): share of actions flagged': 'זיהוי (ספי הלחי): איזה חלק מהפעולות זוהה',
+    'Detection (each placement its own thresholds): share of actions flagged': 'זיהוי (לכל מיקום הספים שלו): איזה חלק מהפעולות זוהה',
     'counts': 'יחידות', 'share': 'חלק', 'x': 'פי', 'n/a': 'אין', 'not recorded': 'עוד לא הוקלט',
     'pressure - rest': 'לחץ מעל המנוחה', 'seconds': 'שניות',
 }
@@ -60,12 +60,12 @@ def median(reps, key, pick=None):
     return float(np.median(vals)) if vals else None
 
 
-def analyse_capture(paths):
+def analyse_capture(paths, profile):
     flushes, calib = ac.load(*paths)
     s = ac.build_series(flushes)
     runs = ac.split_steps(calib)
     mic_lag, _, beep_times, _ = ac.detect_beeps(s, runs)
-    detection = dv.score(dv.detect(s, mic_lag, beep_times), runs, s['offset'])
+    detection = dv.score(dv.detect(s, mic_lag, beep_times, profile), runs, s['offset'])
     steps = {}
     for run, det in zip(runs, detection):  # later runs of a step replace earlier ones
         reps = ac.analyse_run(s, run, mic_lag, beep_times)
@@ -170,7 +170,7 @@ def plot(res, out_dir, he=False):
             e = res[p]['steps'].get(s)
             if e:
                 e['caught_share'] = (e['likely'] + e['maybe']) / e['dos'] if e['dos'] else None
-    bars(axes[2][1], detect_steps, 'caught_share', 'Detection v1 (cheek thresholds): share of actions flagged', 'share')
+    bars(axes[2][1], detect_steps, 'caught_share', 'Detection (each placement its own thresholds): share of actions flagged', 'share')
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, f'placement_comparison{suffix}.png'), dpi=110)
     plt.close(fig)
@@ -231,7 +231,7 @@ def main():
     out_dir = args.out or os.path.join(os.path.dirname(os.path.abspath(args.temple[0])), 'analysis-placement')
     os.makedirs(out_dir, exist_ok=True)
 
-    res = {'cheek': analyse_capture(args.cheek), 'temple': analyse_capture(args.temple)}
+    res = {p: analyse_capture(getattr(args, p), p) for p in PLACEMENTS}  # detect_v1 has a profile per placement
     for p in PLACEMENTS:
         print(f'{p}: {len(res[p]["runs"])} runs, mic lag {res[p]["mic_lag_ms"]:.0f} ms')
     print()
