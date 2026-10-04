@@ -5,13 +5,16 @@
 // per-user (RLS), so this is the way to get the data onto a PC as it happens. Node 22+ (global
 // WebSocket), no dependencies.
 //
-//   node patch_capture.mjs [--out DIR] [--minutes N] [--drive]
+//   node patch_capture.mjs [--out DIR] [--prefix NAME] [--minutes N] [--drive]
 //
 //   --out DIR    where to write (default %USERPROFILE%\BruxAI-data\patch-capture). Keep recordings
 //                out of the repo: it is public, and this is body data.
+//   --prefix NAME  file name prefix (default "capture"; the night launcher uses "night")
 //   --minutes N  stop after N minutes (default: run until Ctrl+C)
-//   --drive      also act as the app: send connect (+ keepalive every 15 s) and disconnect on exit.
-//                For bench tests with no phone; leave it off while the phone runs a calibration.
+//   --drive      also act as the app: send connect (+ keepalive every 15 s) and disconnect on exit,
+//                and connect again whenever the bridge reports idle (it restarted, or a page sent
+//                Disconnect) -- so stop it before pressing Disconnect in the app. For bench tests and
+//                overnight recordings with no phone; leave it off while the phone runs a calibration.
 //
 // Prints a one-line health summary every 10 s (flush gaps, samples per sensor) and one line per
 // calibration cue, so a run can be followed live.
@@ -33,10 +36,11 @@ const argValue = (name, fallback) => {
 const outDir = argValue('--out', path.join(os.homedir(), 'BruxAI-data', 'patch-capture'));
 const minutes = Number(argValue('--minutes', '0'));
 const drive = args.includes('--drive');
+const prefix = argValue('--prefix', 'capture');
 
 fs.mkdirSync(outDir, { recursive: true });
 const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
-const outFile = path.join(outDir, `capture-${stamp}.jsonl`);
+const outFile = path.join(outDir, `${prefix}-${stamp}.jsonl`);
 const out = fs.createWriteStream(outFile, { flags: 'a' });
 console.log(`[capture] writing ${outFile}${drive ? ' (driving the bridge)' : ''}`);
 
@@ -51,6 +55,7 @@ let closing = false;
 const stats = { flushes: 0, gaps: 0, v1: 0, mic: 0, acc: 0, fsm: 0, frames: 0, maxGapMs: 0, lastRecv: 0, state: '?' };
 let lastSeq = null;
 let patchWasConnected = false;
+let lastConnectAt = 0;
 let bandSum = new Array(BAND_COUNT).fill(0);
 
 function send(msg) {
@@ -134,6 +139,7 @@ function connect() {
       console.log(`[capture] channel join ${joined ? 'ok' : 'refused'}`);
       if (joined && drive) {
         command('connect');
+        lastConnectAt = Date.now();
         clearInterval(keepaliveTimer);
         keepaliveTimer = setInterval(() => command('keepalive'), 15000);
       }
@@ -153,6 +159,12 @@ function connect() {
           (p.disc ? ` (reason 0x${p.disc.toString(16)})` : ''));
       }
       patchWasConnected = !!p.patchConnected;
+      // Driving: a bridge that restarted, or got a Disconnect from a page, reports idle -- ask again.
+      if (drive && joined && stats.state === 'idle' && recv - lastConnectAt > 30000) {
+        console.log(`[drive] ${new Date(recv).toLocaleTimeString()} bridge idle -- sending connect`);
+        command('connect');
+        lastConnectAt = recv;
+      }
     }
     else if (event === 'calib') {
       const what = p.type === 'phase' ? `${p.phase} ${p.action || ''} #${p.rep ?? ''}` : p.type;
@@ -186,5 +198,6 @@ function shutdown() {
 setInterval(printStats, 10000);
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+process.on('SIGHUP', shutdown); // Windows: the console window was closed
 if (minutes > 0) setTimeout(shutdown, minutes * 60000);
 connect();
