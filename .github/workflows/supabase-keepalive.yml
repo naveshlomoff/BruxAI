@@ -1,0 +1,28 @@
+# Keeps the free Supabase project awake. Supabase pauses a free project after about a week with no
+# activity; when that happened (Nov 2026) its address stopped existing and the app, the cloud nights
+# and the patch bridge all stopped working until it was restored by hand. A small database query
+# every 3 days counts as activity. A failed run means Supabase did not answer: GitHub emails the
+# repo owner, and the project may need "Restore" in the Supabase dashboard.
+
+name: Supabase keepalive
+
+on:
+  schedule:
+    - cron: '17 6 */3 * *' # 06:17 UTC every 3 days
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query the database
+        env:
+          HOST: https://ukoswihzqpztfypqhdnc.supabase.co
+          KEY: sb_publishable_VTSRe2BT1ppguJKRhwQF3A_xr0rUtBt # publishable, already in index.html
+        run: |
+          for path in "auth/v1/health" "rest/v1/nights?select=id&limit=1"; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 --retry 3 --retry-delay 20 \
+              "$HOST/$path" -H "apikey: $KEY")
+            echo "$path -> $code"
+            [ "$code" = "200" ] || exit 1
+          done
